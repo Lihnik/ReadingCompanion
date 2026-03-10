@@ -139,7 +139,12 @@ def parse_pdf(file_bytes: bytes) -> list:
 
 # ── Ollama Functions ──────────────────────────────────────────────────────────
 
-def call_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: int = 512) -> str:
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> blocks produced by reasoning models (qwen3, deepseek-r1, etc.)."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def call_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: int = 4000) -> str:
     payload = {
         "model": model,
         "prompt": prompt,
@@ -150,7 +155,7 @@ def call_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: i
     try:
         resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
         resp.raise_for_status()
-        return resp.json().get("response", "").strip()
+        return _strip_thinking(resp.json().get("response", ""))
     except requests.exceptions.ConnectionError:
         return "ERROR: Cannot connect to Ollama. Make sure `ollama serve` is running."
     except requests.exceptions.Timeout:
@@ -163,7 +168,7 @@ def call_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: i
         return f"ERROR: {e}"
 
 
-def stream_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: int = 1024):
+def stream_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: int = 2048):
     payload = {
         "model": model,
         "prompt": prompt,
@@ -174,13 +179,35 @@ def stream_ollama(prompt: str, model: str, system_prompt: str = "", num_predict:
     try:
         with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=120) as resp:
             resp.raise_for_status()
+            in_thinking = False
+            buf = ""
             for line in resp.iter_lines():
                 if line:
                     data = json.loads(line.decode("utf-8"))
                     token = data.get("response", "")
                     if token:
-                        yield token
+                        buf += token
+                        # Suppress <think>...</think> blocks from reasoning models
+                        while True:
+                            if in_thinking:
+                                end = buf.find("</think>")
+                                if end == -1:
+                                    buf = ""
+                                    break
+                                buf = buf[end + len("</think>"):]
+                                in_thinking = False
+                            else:
+                                start = buf.find("<think>")
+                                if start == -1:
+                                    yield buf
+                                    buf = ""
+                                    break
+                                yield buf[:start]
+                                buf = buf[start + len("<think>"):]
+                                in_thinking = True
                     if data.get("done", False):
+                        if buf and not in_thinking:
+                            yield buf
                         return
     except requests.exceptions.ConnectionError:
         yield "\n\nERROR: Ollama not reachable. Run `ollama serve` first."
@@ -266,7 +293,11 @@ def _speak_kokoro(text: str, voice: str, speed: float) -> bytes:
         st.session_state[cache_key] = KPipeline(lang_code=lang_code)
     pipeline = st.session_state[cache_key]
 
-    chunks = [audio for _, _, audio in pipeline(text, voice=voice, speed=speed)]
+    chunks = [
+        audio.detach().cpu().numpy()
+        for _, _, audio in pipeline(text, voice=voice, speed=speed)
+        if audio is not None
+    ]
     if not chunks:
         return b""
     full_audio = np.concatenate(chunks)
@@ -536,6 +567,7 @@ with st.sidebar:
             "mistral:7b",
             "gemma2:9b",
             "qwen2.5:7b",
+            "qwen3.5:9b",
             "deepseek-r1:8b",
             "phi3:mini",
         ],

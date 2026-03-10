@@ -9,7 +9,7 @@ comprehension questions, text-to-speech, and a chat interface powered by a local
 
 ## Environment
 
-- Python 3.12 via `.venv\` (Python 3.12 is required for kokoro>=0.9.4)
+- Python 3.12 via `.venv\` (kokoro>=0.9.4 requires Python >=3.10,<3.13)
 - Activate: `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (bash)
 
 ## Setup (first time)
