@@ -50,6 +50,8 @@ DEFAULTS = {
     "tts_format": "audio/mp3",
     "tts_source": "",
     "tts_cache": {},
+    "audiobook_bytes": b"",
+    "audiobook_ext": "wav",
 }
 
 for key, default in DEFAULTS.items():
@@ -286,11 +288,16 @@ def _speak_kokoro(text: str, voice: str, speed: float) -> bytes:
             f"Kokoro dependencies not installed: {e}. "
             "Run: pip install kokoro>=0.9.4 soundfile"
         )
+    import warnings
+    import torch
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     # American English voices start with 'a', British with 'b'
     lang_code = "b" if voice.startswith("b") else "a"
-    cache_key = f"_kokoro_pipeline_{lang_code}"
+    cache_key = f"_kokoro_pipeline_{lang_code}_{device}"
     if cache_key not in st.session_state:
-        st.session_state[cache_key] = KPipeline(lang_code=lang_code)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            st.session_state[cache_key] = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M", device=device)
     pipeline = st.session_state[cache_key]
 
     chunks = [
@@ -340,6 +347,22 @@ def _tts_cached(text: str, voice: str, rate: float, engine: str) -> bool:
     processed = _preprocess_tts_text(text)
     key = hashlib.md5(f"{processed}|{voice}|{rate}|{engine}".encode()).hexdigest()
     return key in st.session_state.tts_cache
+
+
+def _get_or_generate_audio(text: str, voice: str, rate: float, engine: str) -> bytes:
+    """Return audio bytes from cache or generate them, without touching tts_audio state."""
+    processed = _preprocess_tts_text(text)
+    cache_key = hashlib.md5(f"{processed}|{voice}|{rate}|{engine}".encode()).hexdigest()
+    if cache_key in st.session_state.tts_cache:
+        return st.session_state.tts_cache[cache_key][0]
+    if engine == "kokoro":
+        audio_bytes = _speak_kokoro(processed, voice, rate)
+        fmt = "audio/wav"
+    else:
+        audio_bytes = _speak_edge(processed, voice, rate)
+        fmt = "audio/mp3"
+    st.session_state.tts_cache[cache_key] = (audio_bytes, fmt)
+    return audio_bytes
 
 
 def tts_button(label: str, text: str, source: str, tts_voice: str, tts_rate: float, tts_engine: str, full_width: bool = False):
@@ -521,6 +544,68 @@ def render_chat_panel(model: str, tts_voice: str, tts_rate: float, tts_engine: s
     ):
         tts_button("Read last response", st.session_state.chat_history[-1]["content"], "chat", tts_voice, tts_rate, tts_engine)
 
+def render_audiobook_panel(tts_voice: str, tts_rate: float, tts_engine: str):
+    chunks = st.session_state.pdf_chunks
+    total = len(chunks)
+    engine_key = "kokoro" if tts_engine == "Kokoro" else "edge"
+
+    st.markdown(
+        "Generate a single audio file for a range of sections. "
+        "Use the start/end inputs to skip front matter or back matter. "
+        "Sections already read aloud are pulled from cache instantly."
+    )
+
+    col_s, col_e = st.columns(2)
+    with col_s:
+        ab_start = int(st.number_input("Start section", min_value=1, max_value=total, value=1, step=1, key="ab_start"))
+    with col_e:
+        ab_end = int(st.number_input("End section", min_value=1, max_value=total, value=total, step=1, key="ab_end"))
+
+    if ab_start > ab_end:
+        st.warning("Start section must be ≤ end section.")
+        return
+
+    selected = chunks[ab_start - 1 : ab_end]
+    cached_count = sum(1 for c in selected if _tts_cached(c["text"], tts_voice, tts_rate, engine_key))
+    st.caption(f"{len(selected)} sections selected · {cached_count} already cached")
+
+    if st.button("Generate Audiobook", type="primary", use_container_width=True, key="btn_gen_audiobook"):
+        audio_parts = []
+        progress = st.progress(0.0, text="Starting…")
+        for i, chunk in enumerate(selected):
+            progress.progress((i + 1) / len(selected), text=f"Section {ab_start + i} of {ab_end}…")
+            audio_parts.append(_get_or_generate_audio(chunk["text"], tts_voice, tts_rate, engine_key))
+        progress.progress(1.0, text="Combining sections…")
+
+        if engine_key == "kokoro":
+            import numpy as np
+            import soundfile as sf
+            arrays = []
+            for ab in audio_parts:
+                data, _ = sf.read(io.BytesIO(ab))
+                arrays.append(data)
+            out_buf = io.BytesIO()
+            sf.write(out_buf, np.concatenate(arrays), 24000, format="WAV")
+            st.session_state.audiobook_bytes = out_buf.getvalue()
+            st.session_state.audiobook_ext = "wav"
+        else:
+            st.session_state.audiobook_bytes = b"".join(audio_parts)
+            st.session_state.audiobook_ext = "mp3"
+        progress.empty()
+
+    if st.session_state.audiobook_bytes:
+        ext = st.session_state.audiobook_ext
+        fname = st.session_state.pdf_name.replace(".pdf", f"_audiobook.{ext}")
+        size_mb = len(st.session_state.audiobook_bytes) / 1024 / 1024
+        st.download_button(
+            f"Download Audiobook ({size_mb:.1f} MB)",
+            data=st.session_state.audiobook_bytes,
+            file_name=fname,
+            mime=f"audio/{ext}",
+            use_container_width=True,
+        )
+
+
 # ── Page Config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -659,3 +744,7 @@ with left_col:
 
 with right_col:
     render_chat_panel(model, tts_voice, tts_rate, tts_engine)
+
+st.markdown("---")
+with st.expander("Audiobook Generator"):
+    render_audiobook_panel(tts_voice, tts_rate, tts_engine)

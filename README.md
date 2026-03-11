@@ -11,7 +11,8 @@ An AI-powered reading companion that lets you upload a PDF and read it section b
 - **Chat** — streaming conversation grounded in the current section; last 6 messages kept as context
 - **Text-to-speech** — two engines:
   - **Edge TTS** (internet required) — 6 voices across US/UK/AU English, MP3 output
-  - **Kokoro-82M** (fully local) — 9 neural voices, WAV output, ~115 MB model downloaded once
+  - **Kokoro-82M** (fully local) — 9 neural voices, WAV output, ~115 MB model downloaded once; runs on GPU if CUDA is available
+- **Audiobook generator** — render a selectable range of sections to a single WAV/MP3 file and download it; useful for skipping front/back matter
 - **Multi-column PDF support** — detects two-column layouts and reads left column before right
 - **Reasoning model support** — `<think>` blocks from models like Qwen3 and DeepSeek-R1 are silently stripped; token budgets sized accordingly
 
@@ -24,9 +25,14 @@ An AI-powered reading companion that lets you upload a PDF and read it section b
 ## Setup
 
 ```bash
-py -3.12 -m venv .venv
-.venv\Scripts\pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4"
+py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4"
 ```
+
+**GPU acceleration for Kokoro (optional)** — the default kokoro install pulls CPU-only PyTorch. For CUDA (NVIDIA):
+```bash
+.venv/Scripts/pip install torch --force-reinstall --index-url https://download.pytorch.org/whl/cu128
+```
+Kokoro will automatically use the GPU if CUDA is detected; falls back to CPU otherwise.
 
 Pull at least one Ollama model:
 ```bash
