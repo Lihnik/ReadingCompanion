@@ -15,7 +15,7 @@ comprehension questions, text-to-speech, and a chat interface powered by a local
 ## Setup (first time)
 
 ```bash
-py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4" beautifulsoup4
+py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4" beautifulsoup4 pydub
 ```
 
 Kokoro also requires espeak-ng for phoneme generation on Windows — download the installer from
