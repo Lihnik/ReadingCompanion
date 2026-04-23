@@ -277,17 +277,43 @@ def render_sidebar():
         else:  # XTTS
             tts_lang_label = st.selectbox("Language", list(XTTS_LANGUAGES.keys()), index=0)
             tts_voice = XTTS_LANGUAGES[tts_lang_label]
-            spk_file = st.file_uploader(
-                "Speaker voice (WAV, 6+ seconds)",
-                type=["wav"],
-                key="xtts_spk_upload",
-                help="Record or find a clean WAV clip of the voice you want to clone.",
-            )
-            if spk_file is not None:
-                st.session_state.xtts_speaker_wav = spk_file.read()
-                st.success("Speaker voice loaded.")
-            elif not st.session_state.xtts_speaker_wav:
-                st.info("Upload a WAV recording to clone a speaker voice. Any 6+ second clip works.")
+
+            tab_upload, tab_record = st.tabs(["Upload WAV", "Record Voice"])
+
+            with tab_upload:
+                spk_file = st.file_uploader(
+                    "Speaker voice (WAV, 6+ seconds)",
+                    type=["wav"],
+                    key="xtts_spk_upload",
+                    help="A clean WAV clip of the voice you want to clone.",
+                )
+                if spk_file is not None:
+                    st.session_state.xtts_speaker_wav = spk_file.read()
+                    st.success("Speaker voice loaded.")
+                elif not st.session_state.xtts_speaker_wav:
+                    st.info("Upload a WAV recording to clone a speaker voice. Any 6+ second clip works.")
+
+            with tab_record:
+                if st.session_state.get("xtts_clip_recorded"):
+                    st.success("Voice clip saved — ready to use.")
+                    if st.button("Record new clip", key="xtts_rerecord_btn"):
+                        st.session_state["xtts_clip_recorded"] = False
+                        st.rerun()
+                else:
+                    st.caption("Record 6+ seconds of the voice to clone.")
+                    recorded = st.audio_input("Record voice clip", key="xtts_mic_record")
+                    if recorded is not None:
+                        try:
+                            recorded.seek(0)
+                            raw = recorded.read()
+                            if raw:
+                                from companion.tts import convert_audio_to_wav
+                                wav_bytes = convert_audio_to_wav(raw)
+                                st.session_state.xtts_speaker_wav = wav_bytes
+                                st.session_state["xtts_clip_recorded"] = True
+                                st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
         tts_rate = st.slider("Reading speed", min_value=0.5, max_value=2.0, value=1.0, step=0.1,
                              help="1.0 = normal speed. Drag left to slow down, right to speed up.")
 

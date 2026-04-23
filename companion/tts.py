@@ -77,6 +77,36 @@ def _speak_kokoro(text: str, voice: str, speed: float) -> bytes:
     return buf.read()
 
 
+def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
+    """Convert browser-recorded audio (WebM/OGG/etc.) to WAV bytes."""
+    import io
+    import soundfile as sf
+    import numpy as np
+    try:
+        buf = io.BytesIO(audio_bytes)
+        data, sr = sf.read(buf)
+        out = io.BytesIO()
+        sf.write(out, data.astype(np.float32), sr, format="WAV")
+        out.seek(0)
+        return out.read()
+    except Exception:
+        pass
+    try:
+        from pydub import AudioSegment
+        seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        out = io.BytesIO()
+        seg.export(out, format="wav")
+        out.seek(0)
+        return out.read()
+    except ImportError:
+        raise RuntimeError(
+            "pydub is required to convert browser audio to WAV. "
+            "Run: pip install pydub  (also needs ffmpeg on PATH)"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Could not convert recorded audio to WAV: {e}")
+
+
 def _speak_xtts(text: str, language: str, speaker_wav_bytes: bytes, speed: float) -> bytes:
     try:
         from TTS.tts.configs.xtts_config import XttsConfig

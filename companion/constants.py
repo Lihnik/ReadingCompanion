@@ -40,6 +40,7 @@ DEFAULTS = {
     "audiobook_bytes": b"",
     "audiobook_ext": "wav",
     "xtts_speaker_wav": b"",
+    "xtts_clip_recorded": False,
 }
 
 EDGE_VOICES = {
