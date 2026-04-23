@@ -15,7 +15,7 @@ comprehension questions, text-to-speech, and a chat interface powered by a local
 ## Setup (first time)
 
 ```bash
-py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4"
+py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4" beautifulsoup4
 ```
 
 Kokoro also requires espeak-ng for phoneme generation on Windows — download the installer from
@@ -42,7 +42,9 @@ Default Streamlit port is 8501. The app opens automatically in the browser.
 
 - **Single-file app**: all logic lives in `reading_companion.py` — no modules or packages
 - **Session state**: all runtime state is in `st.session_state` (defined in `DEFAULTS` dict at top)
-- **TTS engines**: Edge TTS (internet, MP3) and Kokoro-82M (local, WAV) — selected in sidebar
-- **TTS cache**: generated audio is cached in session state by hash of (text, voice, rate, engine)
+- **TTS engines**: Edge TTS (internet, MP3), Kokoro-82M (local English WAV), XTTS (local multilingual WAV, voice cloning) — selected in sidebar
+- **TTS cache**: generated audio is cached in session state; cache key = MD5(text|voice|rate|engine) for edge/kokoro, MD5(text|language|speaker_wav_hash|engine) for XTTS
+- **XTTS**: uses `tartuNLP/XTTS-v2-multi` (~5.8 GB via `huggingface_hub.snapshot_download`); requires user-uploaded speaker WAV; needs `coqui-tts[codec]`, `torchaudio`, `transformers>=4.33,<5.0`
 - **PDF parsing**: PyMuPDF with multi-column detection; one section per page (split if >3000 chars)
+- **EPUB parsing**: stdlib zipfile + xml.etree + beautifulsoup4; spine order preserved, chapter titles from headings
 - **AI model**: any Ollama model; default `llama3.1:8b` — pull with `ollama pull <model>`
