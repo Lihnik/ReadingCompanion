@@ -4,14 +4,15 @@ An AI-powered reading companion that lets you upload a PDF and read it section b
 
 ## Features
 
-- **Section-by-section reading** — PDF is split into pages (long pages split further at ~3000 characters); navigate with Prev/Next or jump directly to any section
+- **Section-by-section reading** — PDF or EPUB uploaded, split into sections (~3000 characters max); navigate with Prev/Next or jump directly to any section
 - **AI commentary** — automatic 2-3 sentence insight per section (not a summary — adds perspective)
 - **Comprehension questions** — one question per section with answer submission and AI feedback
 - **Section summarizer** — on-demand bullet-point summary
 - **Chat** — streaming conversation grounded in the current section; last 6 messages kept as context
-- **Text-to-speech** — two engines:
+- **Text-to-speech** — three engines:
   - **Edge TTS** (internet required) — 6 voices across US/UK/AU English, MP3 output
   - **Kokoro-82M** (fully local) — 9 neural voices, WAV output, ~115 MB model downloaded once; runs on GPU if CUDA is available
+  - **XTTS** (fully local, voice cloning) — Estonian, Finnish, and 16 other languages; upload any 6+ second WAV to clone that voice; ~5.8 GB model downloaded once; GPU accelerated
 - **Audiobook generator** — render a selectable range of sections to a single WAV/MP3 file and download it; useful for skipping front/back matter
 - **Multi-column PDF support** — detects two-column layouts and reads left column before right
 - **Reasoning model support** — `<think>` blocks from models like Qwen3 and DeepSeek-R1 are silently stripped; token budgets sized accordingly
@@ -25,14 +26,20 @@ An AI-powered reading companion that lets you upload a PDF and read it section b
 ## Setup
 
 ```bash
-py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4"
+py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4" beautifulsoup4
 ```
 
-**GPU acceleration for Kokoro (optional)** — the default kokoro install pulls CPU-only PyTorch. For CUDA (NVIDIA):
+**GPU acceleration for Kokoro and XTTS (recommended for NVIDIA GPUs):**
 ```bash
-.venv/Scripts/pip install torch --force-reinstall --index-url https://download.pytorch.org/whl/cu128
+.venv/Scripts/pip install torch torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128
 ```
-Kokoro will automatically use the GPU if CUDA is detected; falls back to CPU otherwise.
+Both engines automatically use the GPU if CUDA is detected; fall back to CPU otherwise.
+
+**XTTS engine (Estonian/multilingual TTS):**
+```bash
+.venv/Scripts/pip install "coqui-tts[codec]" huggingface_hub "transformers>=4.33.0,<5.0"
+```
+The ~5.8 GB model is downloaded on first use and cached permanently.
 
 Pull at least one Ollama model:
 ```bash
@@ -92,3 +99,7 @@ Select in the sidebar — pull each with `ollama pull <name>` first:
 | Emma (UK, Female) B- | `bf_emma` |
 | George (UK, Male) B | `bm_george` |
 | Fable (UK, Male) B | `bm_fable` |
+
+**XTTS** ([tartuNLP/XTTS-v2-multi](https://huggingface.co/tartuNLP/XTTS-v2-multi), local, voice cloning)
+
+Voice is determined by a reference WAV file you upload — any 6+ second clean speech recording works. Supported languages: Estonian, Finnish, English, German, French, Spanish, Russian, Polish, Dutch, Italian, Portuguese, Czech, Turkish, Arabic, Chinese, Japanese, Korean, Hungarian.
