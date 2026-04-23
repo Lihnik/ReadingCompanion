@@ -1,3 +1,4 @@
+import html
 import io
 import re
 
@@ -22,6 +23,7 @@ from .ollama import (
     build_chat_prompt,
     build_summary_prompt,
 )
+from .hero import render_landing_hero
 from .parsing import parse_epub, parse_pdf
 from .tts import (
     _get_or_generate_audio,
@@ -369,11 +371,36 @@ def render_app():
     model, tts_voice, tts_rate, tts_engine = render_sidebar()
 
     if not st.session_state.pdf_chunks:
-        st.info("Upload a PDF in the sidebar to get started.")
+        st.markdown("""
+        <style>
+          .block-container { padding-top: 0 !important; padding-bottom: 0 !important;
+                             max-width: 100% !important; }
+          header[data-testid="stHeader"] { background: transparent; }
+        </style>
+        """, unsafe_allow_html=True)
+        render_landing_hero(
+            headline_variant="silence",
+            brand="Reading Companion",
+            cta_label="Open the sidebar to begin",
+            scrim="soft",
+            show_meta=True,
+        )
         st.stop()
 
     if not st.session_state.reading_started:
-        st.info(f"**{st.session_state.pdf_name}** loaded with {len(st.session_state.pdf_chunks)} sections. Click **▶ Start Reading** in the sidebar.")
+        st.markdown(f"""
+        <div style="margin: 4rem auto; max-width: 520px; padding: 2rem 2.5rem;
+                    border: 1px solid #3a3a4a; border-radius: 12px;
+                    background: #16161e; color: #d4d0c8; font-family: sans-serif;">
+          <p style="margin:0 0 .5rem; font-size:.8rem; letter-spacing:.12em;
+                    text-transform:uppercase; color:#b8995e;">Ready</p>
+          <p style="margin:0 0 1.25rem; font-size:1.15rem; font-weight:600;">
+            {html.escape(st.session_state.pdf_name)}</p>
+          <p style="margin:0; color:#8a8a9a;">
+            {len(st.session_state.pdf_chunks)} sections loaded.
+            Click <strong style="color:#d4d0c8;">&#9654; Start Reading</strong> in the sidebar.</p>
+        </div>
+        """, unsafe_allow_html=True)
         st.stop()
 
     if st.session_state.tts_error:
