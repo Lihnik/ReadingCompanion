@@ -1,3 +1,4 @@
+import html
 import io
 import re
 
@@ -22,6 +23,7 @@ from .ollama import (
     build_chat_prompt,
     build_summary_prompt,
 )
+from .hero import render_landing_hero, render_ambient_bg_html
 from .parsing import parse_epub, parse_pdf
 from .tts import (
     _get_or_generate_audio,
@@ -29,6 +31,33 @@ from .tts import (
     speak_text,
     stop_speech,
     tts_button,
+)
+
+
+# ---------------------------------------------------------------------------
+# GLASS PANEL STYLE
+# These values are reused for every hand-rolled HTML panel (book text,
+# AI commentary).  Change them once here to restyle all panels together.
+#
+#   _PANEL_BG      – fill colour;  raise alpha (0.0–1.0) for a more opaque
+#                    panel, lower it to let more video show through
+#   _PANEL_BORDER  – white border opacity; 0.0 = invisible, 0.25 = obvious
+#   _PANEL_RADIUS  – corner rounding in px
+#   _PANEL_BLUR    – backdrop blur in px; higher = frostier glass
+# ---------------------------------------------------------------------------
+_PANEL_BG     = "rgba(6, 14, 34, 0.22)"
+_PANEL_BORDER = "rgba(255, 255, 255, 0.13)"
+_PANEL_RADIUS = "14px"
+_PANEL_BLUR   = "8px"
+
+# Shared inline-style fragment used by every glass panel.
+_GLASS = (
+    f"background:{_PANEL_BG};"
+    f"backdrop-filter:blur({_PANEL_BLUR}) saturate(1.5);"
+    f"-webkit-backdrop-filter:blur({_PANEL_BLUR}) saturate(1.5);"
+    f"border:1px solid {_PANEL_BORDER};"
+    f"border-radius:{_PANEL_RADIUS};"
+    f"padding:.875rem 1.125rem;"
 )
 
 
@@ -44,6 +73,9 @@ def render_comprehension_question(chunk: dict, model: str, tts_voice: str, tts_r
     tts_button("Read question", st.session_state.ai_question, "question", tts_voice, tts_rate, tts_engine)
 
     if not st.session_state.question_answered:
+        # Form contains the answer input + Submit / Skip buttons.
+        # The glass look on this form comes from the CSS in hero.py
+        # ([data-testid="stForm"] rule), not from inline styles here.
         with st.form(key="answer_form"):
             user_answer = st.text_input("Your answer:")
             col1, col2 = st.columns([3, 1])
@@ -68,6 +100,8 @@ def render_comprehension_question(chunk: dict, model: str, tts_voice: str, tts_r
             st.rerun()
     else:
         if st.session_state.question_feedback:
+            # Streamlit's st.success() — styled by the [data-testid="stAlert"]
+            # rule in hero.py.  To change colour/style, edit that CSS rule.
             st.success(st.session_state.question_feedback)
             tts_button("Read feedback", st.session_state.question_feedback, "feedback", tts_voice, tts_rate, tts_engine)
 
@@ -77,19 +111,56 @@ def render_reading_panel(model: str, tts_voice: str = "en-US-AriaNeural", tts_ra
 
     st.subheader(chunk["title"])
 
-    with st.container(height=300, border=True):
-        st.markdown(chunk["text"])
+    # --- Book text panel ---
+    # This is a plain HTML div so we control its style completely.
+    # Tweak height (default 300px) to show more/less text before scrolling.
+    # Text colour: rgba(225, 232, 248, 0.95) — bright near-white.
+    # Font size:   0.9rem (~14px).  Increase to 1rem for larger text.
+    _BOOK_TEXT_HEIGHT = "300px"
+    _BOOK_TEXT_COLOR  = "rgba(225, 232, 248, 0.95)"
+    _BOOK_TEXT_SIZE   = "0.9rem"
+
+    _paras = [p.strip() for p in chunk["text"].split("\n\n") if p.strip()] or [chunk["text"]]
+    _body = "".join(
+        f'<p style="margin:0 0 .8em 0;line-height:1.75;">{html.escape(p)}</p>'
+        for p in _paras
+    )
+    st.markdown(
+        f'<div style="width:100%;box-sizing:border-box;'
+        f'height:{_BOOK_TEXT_HEIGHT};overflow-y:auto;{_GLASS}'
+        f'color:{_BOOK_TEXT_COLOR};font-size:{_BOOK_TEXT_SIZE};'
+        f'scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.15) transparent;">'
+        f'{_body}</div>',
+        unsafe_allow_html=True,
+    )
 
     tts_button("Read section aloud", chunk["text"], "section", tts_voice, tts_rate, tts_engine, full_width=True)
 
     st.markdown("---")
+
+    # --- AI Commentary panel ---
+    # Same glass style as the book text panel (_GLASS constant above).
+    # Slightly more muted text colour to visually separate it from the
+    # book text.  Change _COMMENTARY_COLOR to make it brighter/dimmer.
+    _COMMENTARY_COLOR = "rgba(210, 225, 248, 0.90)"
+    _COMMENTARY_SIZE  = "0.9rem"
 
     st.markdown("**AI Commentary**")
     if not st.session_state.ai_commentary:
         with st.spinner("AI is reading this section..."):
             commentary = call_ollama(build_commentary_prompt(chunk["text"]), model, SYSTEM_PROMPT_COMMENTARY)
             st.session_state.ai_commentary = commentary
-    st.info(st.session_state.ai_commentary)
+    _paras = [p.strip() for p in st.session_state.ai_commentary.split("\n\n") if p.strip()] or [st.session_state.ai_commentary]
+    _body = "".join(
+        f'<p style="margin:0 0 .7em 0;line-height:1.7;">{html.escape(p)}</p>'
+        for p in _paras
+    )
+    st.markdown(
+        f'<div style="width:100%;box-sizing:border-box;{_GLASS}'
+        f'color:{_COMMENTARY_COLOR};font-size:{_COMMENTARY_SIZE};line-height:1.7;">'
+        f'{_body}</div>',
+        unsafe_allow_html=True,
+    )
     tts_button("Read commentary", st.session_state.ai_commentary, "commentary", tts_voice, tts_rate, tts_engine)
 
     st.markdown("---")
@@ -102,6 +173,7 @@ def render_reading_panel(model: str, tts_voice: str = "en-US-AriaNeural", tts_ra
             st.session_state.section_summary = summary
 
     if st.session_state.section_summary:
+        # Expander glass style comes from [data-testid="stExpander"] in hero.py.
         with st.expander("Section Summary", expanded=True):
             st.write(st.session_state.section_summary)
             tts_button("Read summary", st.session_state.section_summary, "summary", tts_voice, tts_rate, tts_engine)
@@ -110,6 +182,11 @@ def render_reading_panel(model: str, tts_voice: str = "en-US-AriaNeural", tts_ra
 def render_chat_panel(model: str, tts_voice: str, tts_rate: float, tts_engine: str):
     st.subheader("Chat with AI")
 
+    # Chat message container — glass styling comes from the CSS rule
+    # [data-testid="stVerticalBlockBorderWrapper"] in hero.py.
+    # Change height here to give more/less scroll space for messages.
+    # border=True tells Streamlit to render the border wrapper that the
+    # CSS targets; set to False to remove the container entirely.
     with st.container(height=400, border=True):
         if not st.session_state.chat_history:
             st.caption("No messages yet. Ask anything about what you're reading.")
@@ -118,6 +195,8 @@ def render_chat_panel(model: str, tts_voice: str, tts_rate: float, tts_engine: s
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
 
+    # Chat input bar — glass style from [data-testid="stChatInputContainer"]
+    # in hero.py.  The pill shape (border-radius: 28px) is set there too.
     user_input = st.chat_input(
         "Ask anything about this book...",
         disabled=not st.session_state.reading_started,
@@ -368,13 +447,88 @@ def render_sidebar():
 def render_app():
     model, tts_voice, tts_rate, tts_engine = render_sidebar()
 
+    # ------------------------------------------------------------------
+    # PATH 1 — no book loaded yet: full-screen cinematic hero.
+    # To change the headline, pass a different headline_variant:
+    #   "silence" | "quiet" | "pages" | "voice"  (defined in hero.py)
+    # To change the background scrim darkness:
+    #   scrim="soft" | "heavy" | "none"
+    # show_hint=True shows "Upload a book in the sidebar to begin."
+    # ------------------------------------------------------------------
     if not st.session_state.pdf_chunks:
-        st.info("Upload a PDF in the sidebar to get started.")
+        st.markdown("""
+        <style>
+          [data-testid="stMain"] .block-container {
+            padding: 0 !important;
+            max-width: 100% !important;
+          }
+          header[data-testid="stHeader"] { background: transparent; }
+          [data-testid="stMain"] iframe {
+            height: calc(100vh - 60px) !important;
+            min-height: 640px !important;
+            display: block !important;
+          }
+        </style>
+        """, unsafe_allow_html=True)
+        render_landing_hero(
+            headline_variant="silence",
+            scrim="soft",
+            show_meta=True,
+            show_hint=True,
+        )
         st.stop()
 
+    # ------------------------------------------------------------------
+    # PATH 2 — book parsed, reading not started yet: ambient video +
+    # a frosted "Ready" card.
+    # To adjust the card appearance, edit the inline div below:
+    #   max-width      — card width
+    #   border-radius  — corner rounding
+    #   background     — card fill (rgba, affects opacity)
+    #   backdrop-filter: blur(Npx)  — frosted-glass blur amount
+    # Color of the "READY" label: #b8995e (gold)
+    # ------------------------------------------------------------------
     if not st.session_state.reading_started:
-        st.info(f"**{st.session_state.pdf_name}** loaded with {len(st.session_state.pdf_chunks)} sections. Click **▶ Start Reading** in the sidebar.")
+        st.markdown(render_ambient_bg_html(), unsafe_allow_html=True)
+        book_name = html.escape(st.session_state.pdf_name)
+        section_count = len(st.session_state.pdf_chunks)
+        st.markdown(f"""
+        <div style="margin:6rem auto;max-width:480px;padding:2rem 2.5rem;
+                    border:1px solid rgba(255,255,255,0.10);border-radius:14px;
+                    background:rgba(10,18,30,0.70);backdrop-filter:blur(8px);
+                    -webkit-backdrop-filter:blur(8px);color:#d4d0c8;
+                    font-family:'Inter',sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.45);">
+          <p style="margin:0 0 .4rem;font-size:.75rem;letter-spacing:.12em;
+                    text-transform:uppercase;color:#b8995e;">Ready</p>
+          <p style="margin:0 0 1rem;font-size:1.1rem;font-weight:600;">{book_name}</p>
+          <p style="margin:0;color:#8a8a9a;font-size:.95rem;">
+            {section_count} sections loaded —
+            click <strong style="color:#d4d0c8;">&#9654; Start Reading</strong> in the sidebar.</p>
+        </div>
+        """, unsafe_allow_html=True)
         st.stop()
+
+    # ------------------------------------------------------------------
+    # PATH 3 — active reading session.
+    #
+    # render_ambient_bg_html() injects the background video + all glass CSS.
+    # Key knobs (edit in hero.py → render_ambient_bg_html):
+    #   scrim_opacity  — base dark tint over the video (0.0–1.0).
+    #                    Higher = darker page, easier to read, less video.
+    #                    Current: 0.22
+    #   opacity        — video visibility (default 0.85 in the function).
+    #                    Lower to make the video more subtle.
+    #   glass_ui=True  — applies backdrop-filter to all Streamlit panels
+    #                    (sidebar, header, bordered containers, alerts…).
+    #                    Set False to turn off glass on Streamlit widgets.
+    #
+    # All CSS for Streamlit-native widgets (forms, alerts, chat input,
+    # bordered containers) lives in companion/hero.py inside the
+    # glass_css string.  Edit _PANEL_BG / _PANEL_BORDER etc. at the top
+    # of THIS file to restyle the HTML-rendered panels (book text,
+    # AI commentary).
+    # ------------------------------------------------------------------
+    st.markdown(render_ambient_bg_html(scrim_opacity=0.5, glass_ui=True), unsafe_allow_html=True)
 
     if st.session_state.tts_error:
         st.error(st.session_state.tts_error)
@@ -391,6 +545,10 @@ def render_app():
                 stop_speech()
                 st.rerun()
 
+    # Two-column layout: reading panel (left, wider) + chat panel (right).
+    # Change the ratio [3, 2] to shift space between columns, e.g.:
+    #   [2, 1]  — reading panel gets more room
+    #   [1, 1]  — equal split
     left_col, right_col = st.columns([3, 2], gap="large")
 
     with left_col:
@@ -400,5 +558,7 @@ def render_app():
         render_chat_panel(model, tts_voice, tts_rate, tts_engine)
 
     st.markdown("---")
+    # Audiobook generator lives in a collapsible expander at the bottom.
+    # Glass style: [data-testid="stExpander"] in hero.py.
     with st.expander("Audiobook Generator"):
         render_audiobook_panel(tts_voice, tts_rate, tts_engine)
