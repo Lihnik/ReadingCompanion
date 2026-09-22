@@ -68,14 +68,14 @@ Default Streamlit port is 8501. The app opens automatically in the browser.
   per-word ▶ via `speak_vocab_word` (Edge neural for book language from
   `EDGE_LANG_VOICES`, else XTTS word-mode with `f"{word}."` + lower temperature);
   clears progressive playlist / bumps `tts_player_gen` so the HTML player does
-  not restore a long-section buffer. Bilingual “Read vocabulary” still queues
-  word + Edge translation clips on one track.
+  not restore a long-section buffer. Prefetch Edge clips after vocab extract;
+  per-word ▶ uses inline HTML audio (no shared-player remount). “Read vocabulary” removed.
 - **Progressive TTS**: `speak_text` / `tts_button` split long text (XTTS ~200
   chars); first segment plays ASAP; remaining segments continue via
-  `@st.fragment(run_every=…)`. Playback uses `_render_segment_queue_audio`
-  (option 3: one `<audio>` bar, internal segment blob queue, advance on
-  `ended` — no live concat splice into playing `src`). Full concat is built
-  only when the playlist completes. Session keys: `tts_segments`,
+  `@st.fragment(run_every=…)`. Playback mounts one persistent HTML `<audio>` outside the polling fragment;
+  new segments are pushed via `localStorage`/`window.parent` and drained in JS
+  without remounting the playing element (no bar flicker / micro-stutter on each
+  ~4s chunk boundary). Full concat is built only when the playlist completes. Session keys: `tts_segments`,
   `tts_segment_audios`, `tts_progressive_*`, `tts_player_gen`. Cache capped at
   `TTS_CACHE_MAX_ENTRIES`.
 - **Ollama GPU**: model residency/GPU is via Ollama (`ollama ps`), not Streamlit.

@@ -3,6 +3,8 @@ import base64
 import hashlib
 import io
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import edge_tts
 import streamlit as st
@@ -17,6 +19,225 @@ from .constants import (
 
 DEFAULT_EN_EDGE_VOICE = "en-US-AriaNeural"
 DEFAULT_EN_KOKORO_VOICE = "af_heart"
+
+
+# Background vocab prefetch (threads write here; drained into session_state each run)
+_VOCAB_PREFETCH_LOCK = threading.Lock()
+_VOCAB_PREFETCH_RESULTS: dict = {}
+_VOCAB_PREFETCH_PENDING: set = set()
+
+
+def _vocab_cache_key(word: str, book_language: str, voice: str) -> tuple:
+    return ((word or "").strip(), book_language or "", voice or "")
+
+
+def drain_vocab_prefetch_into_session() -> None:
+    """Merge background-prefetch results into session_state.vocab_audio_cache."""
+    if "vocab_audio_cache" not in st.session_state:
+        st.session_state.vocab_audio_cache = {}
+    with _VOCAB_PREFETCH_LOCK:
+        items = list(_VOCAB_PREFETCH_RESULTS.items())
+    cache = st.session_state.vocab_audio_cache
+    tts_cache = st.session_state.get("tts_cache")
+    for key, (audio_bytes, fmt) in items:
+        cache[key] = (audio_bytes, fmt)
+        if tts_cache is not None:
+            word, _lang, voice = key
+            ck = _make_tts_cache_key(word, voice, 1.0, "edge")
+            if ck not in tts_cache:
+                tts_cache[ck] = (audio_bytes, fmt)
+
+
+def get_vocab_audio_cached(word: str, book_language: str, tts_rate: float = 1.0):
+    """Return (bytes, mime) if cached, else None."""
+    drain_vocab_prefetch_into_session()
+    word = (word or "").strip()
+    if not word:
+        return None
+    edge_voice = edge_voice_for_language(book_language)
+    if not edge_voice:
+        return None
+    key = _vocab_cache_key(word, book_language, edge_voice)
+    hit = st.session_state.get("vocab_audio_cache", {}).get(key)
+    if hit:
+        return hit
+    ck = _make_tts_cache_key(word, edge_voice, tts_rate, "edge")
+    if ck in st.session_state.get("tts_cache", {}):
+        return st.session_state.tts_cache[ck]
+    return None
+
+
+def generate_vocab_word_audio(
+    word: str,
+    book_language: str,
+    tts_rate: float,
+    xtts_voice: str | None = None,
+) -> tuple[bytes, str] | None:
+    """Generate one vocab word clip and cache it. Does NOT touch progressive player state."""
+    word = (word or "").strip()
+    if not word:
+        return None
+    if "vocab_audio_cache" not in st.session_state:
+        st.session_state.vocab_audio_cache = {}
+
+    edge_voice = edge_voice_for_language(book_language)
+    if edge_voice:
+        key = _vocab_cache_key(word, book_language, edge_voice)
+        hit = st.session_state.vocab_audio_cache.get(key)
+        if hit:
+            return hit
+        try:
+            cache_key = _make_tts_cache_key(word, edge_voice, tts_rate, "edge")
+            if cache_key in st.session_state.tts_cache:
+                audio_bytes, fmt = st.session_state.tts_cache[cache_key]
+            else:
+                audio_bytes = _speak_edge(word, edge_voice, tts_rate)
+                fmt = "audio/mp3"
+                _cache_put(cache_key, audio_bytes, fmt)
+            st.session_state.vocab_audio_cache[key] = (audio_bytes, fmt)
+            return audio_bytes, fmt
+        except Exception:
+            pass
+
+    lang = (xtts_voice or "").strip() or XTTS_LANGUAGES.get(book_language) or "en"
+    if not st.session_state.get("xtts_speaker_wav"):
+        return None
+    prompt = word.rstrip(".!?…") + "."
+    vkey = _vocab_cache_key(word, book_language, f"xtts:{lang}")
+    hit = st.session_state.vocab_audio_cache.get(vkey)
+    if hit:
+        return hit
+    cache_key = _make_tts_cache_key(f"vocab:{prompt}", lang, tts_rate, "xtts")
+    try:
+        if cache_key in st.session_state.tts_cache:
+            audio_bytes, fmt = st.session_state.tts_cache[cache_key]
+        else:
+            audio_bytes = _speak_xtts_chunks(
+                [prompt],
+                lang,
+                st.session_state.xtts_speaker_wav,
+                tts_rate,
+                word_mode=True,
+            )
+            fmt = "audio/wav"
+            _cache_put(cache_key, audio_bytes, fmt)
+        st.session_state.vocab_audio_cache[vkey] = (audio_bytes, fmt)
+        return audio_bytes, fmt
+    except Exception:
+        return None
+
+
+def _prefetch_one_edge_word(word: str, voice: str, rate: float, book_language: str) -> None:
+    word = (word or "").strip()
+    if not word or not voice:
+        return
+    key = _vocab_cache_key(word, book_language, voice)
+    with _VOCAB_PREFETCH_LOCK:
+        if key in _VOCAB_PREFETCH_RESULTS or key in _VOCAB_PREFETCH_PENDING:
+            return
+        _VOCAB_PREFETCH_PENDING.add(key)
+    try:
+        audio_bytes = _speak_edge(word, voice, rate)
+        with _VOCAB_PREFETCH_LOCK:
+            _VOCAB_PREFETCH_RESULTS[key] = (audio_bytes, "audio/mp3")
+    except Exception:
+        pass
+    finally:
+        with _VOCAB_PREFETCH_LOCK:
+            _VOCAB_PREFETCH_PENDING.discard(key)
+
+
+def prefetch_vocab_audio(entries: list, book_language: str, tts_rate: float = 1.0) -> None:
+    """Background-prefetch Edge audio for vocab words (non-blocking)."""
+    edge_voice = edge_voice_for_language(book_language)
+    if not edge_voice:
+        return
+    words = []
+    for v in entries or []:
+        if isinstance(v, dict):
+            w = (v.get("word") or "").strip()
+        else:
+            w = (str(v) if v is not None else "").strip()
+        if w:
+            words.append(w)
+    if not words:
+        return
+    seen = set()
+    uniq = []
+    for w in words:
+        wl = w.lower()
+        if wl not in seen:
+            seen.add(wl)
+            uniq.append(w)
+
+    drain_vocab_prefetch_into_session()
+    pending = []
+    for w in uniq:
+        key = _vocab_cache_key(w, book_language, edge_voice)
+        if key in st.session_state.get("vocab_audio_cache", {}):
+            continue
+        with _VOCAB_PREFETCH_LOCK:
+            if key in _VOCAB_PREFETCH_RESULTS or key in _VOCAB_PREFETCH_PENDING:
+                continue
+        pending.append(w)
+    if not pending:
+        return
+
+    def _run(batch):
+        workers = min(4, len(batch))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(
+                pool.map(
+                    lambda w: _prefetch_one_edge_word(w, edge_voice, tts_rate, book_language),
+                    batch,
+                )
+            )
+
+    threading.Thread(target=_run, args=(pending,), daemon=True, name="vocab-prefetch").start()
+
+
+def render_inline_vocab_audio_button(
+    word: str,
+    audio_bytes: bytes,
+    fmt: str,
+    *,
+    btn_id: str,
+    autoplay: bool = False,
+) -> bool:
+    """HTML ▶ + hidden <audio> — plays in-browser with zero Streamlit rerun."""
+    try:
+        import streamlit.components.v1 as components
+    except Exception:
+        return False
+    if not audio_bytes:
+        return False
+    mime = fmt if "/" in (fmt or "") else f"audio/{fmt or 'mp3'}"
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    safe_label = (word or "play")[:40].replace("<", "").replace(">", "").replace('"', "")
+    auto_js = "true" if autoplay else "false"
+    _ = btn_id
+    html = f"""<!DOCTYPE html><html><body style="margin:0;background:transparent;">
+<button id="b" title="Pronounce: {safe_label}" style="
+  width:100%;height:32px;border-radius:8px;border:1px solid rgba(255,255,255,.25);
+  background:rgba(255,220,130,.18);color:rgba(255,230,160,.95);cursor:pointer;
+  font-size:14px;line-height:1;">▶</button>
+<audio id="a" preload="auto" src="data:{mime};base64,{b64}"></audio>
+<script>
+(function(){{
+  const btn=document.getElementById("b");
+  const audio=document.getElementById("a");
+  const AUTO={auto_js};
+  function play(){{
+    try{{ audio.currentTime=0; }}catch(e){{}}
+    audio.play().catch(function(){{}});
+  }}
+  btn.addEventListener("click", function(ev){{ ev.preventDefault(); play(); }});
+  if(AUTO){{ play(); }}
+}})();
+</script></body></html>"""
+    components.html(html, height=40)
+    return True
+
 
 
 async def _edge_generate(text: str, voice: str, rate_str: str) -> bytes:
@@ -469,33 +690,196 @@ def _render_continuity_audio(audio_bytes: bytes, fmt: str, *, autoplay: bool) ->
 
 
 
-def _render_segment_queue_audio(segments: list, *, autoplay: bool) -> bool:
-    """Play segment blobs sequentially on one <audio> bar (option 3).
+def _segment_payload(segments: list) -> list:
+    """Serialize segment (bytes, mime) pairs to [{mime,b64}, ...] for JS."""
+    segs = []
+    for ab, fmt in segments or []:
+        if not ab:
+            continue
+        mime = fmt if "/" in (fmt or "") else f"audio/{fmt or 'wav'}"
+        segs.append({"mime": mime, "b64": base64.b64encode(ab).decode("ascii")})
+    return segs
 
-    Restores the same segment index + currentTime across Streamlit remounts and
-    advances on ended. Never splices a growing concat into the playing src.
-    Native scrubber covers the current segment; caption shows Loaded N/M totals.
+
+def _progressive_player_id() -> str:
+    gen = int(st.session_state.get("tts_player_gen") or 0)
+    source = st.session_state.get("tts_source") or "tts"
+    return f"{source}_{gen}"
+
+
+def _push_segments_to_browser(segments: list) -> bool:
+    """Write current segment list into parent/localStorage for the persistent player.
+
+    Safe to remount every fragment tick — does not create or touch an <audio> element.
     """
     try:
         import json
         import streamlit.components.v1 as components
     except Exception:
         return False
-    if not segments:
+    segs = _segment_payload(segments)
+    if not segs:
+        return False
+    player_id = _progressive_player_id()
+    segs_json = json.dumps(segs, separators=(",", ":"))
+    html = f"""<!DOCTYPE html><html><body style="margin:0;height:0;overflow:hidden;">
+<script>
+(function(){{
+  const ID={player_id!r};
+  const SEGS={segs_json};
+  try {{
+    window.parent.__rc_tts = window.parent.__rc_tts || {{}};
+    window.parent.__rc_tts[ID] = SEGS;
+  }} catch(e) {{}}
+  try {{
+    localStorage.setItem("rc_tts_segs_"+ID, JSON.stringify(SEGS));
+  }} catch(e) {{}}
+}})();
+</script></body></html>"""
+    components.html(html, height=0)
+    return True
+
+
+def _render_persistent_queue_player(*, autoplay: bool) -> bool:
+    """One persistent <audio> that drains segments from parent/localStorage.
+
+    HTML depends only on player_id + autoplay (NOT segment count), so fragment
+    reruns that remount a sibling pusher do not recreate this element when the
+    player itself is mounted outside the polling fragment.
+    """
+    try:
+        import streamlit.components.v1 as components
+    except Exception:
         return False
 
-    segs = []
-    for ab, fmt in segments:
-        if not ab:
-            continue
-        mime = fmt if "/" in (fmt or "") else f"audio/{fmt or 'wav'}"
-        segs.append({"mime": mime, "b64": base64.b64encode(ab).decode("ascii")})
+    player_id = _progressive_player_id()
+    auto_js = "true" if autoplay else "false"
+    html = f"""<!DOCTYPE html><html><body style="margin:0;background:transparent;">
+<audio id="a" controls style="width:100%;height:40px;"></audio>
+<script>
+(function(){{
+  const ID={player_id!r};
+  const AUTO={auto_js};
+  const STATE_KEY="rc_tts_q_"+ID;
+  const SEGS_KEY="rc_tts_segs_"+ID;
+  const audio=document.getElementById("a");
+  let segs=[];
+  let state={{i:0,t:0,playing:false}};
+  let loading=false;
+  let lastLen=-1;
+
+  try{{ const raw=sessionStorage.getItem(STATE_KEY); if(raw) state=JSON.parse(raw); }}catch(e){{}}
+  if(!Number.isFinite(state.i) || state.i<0) state.i=0;
+
+  function persist(){{
+    try{{
+      sessionStorage.setItem(STATE_KEY, JSON.stringify({{
+        i: Number(audio.dataset.seg||state.i||0),
+        t: audio.currentTime||0,
+        playing: !audio.paused
+      }}));
+    }}catch(e){{}}
+  }}
+
+  function readSegs(){{
+    try {{
+      if(window.parent.__rc_tts && window.parent.__rc_tts[ID]) {{
+        return window.parent.__rc_tts[ID] || [];
+      }}
+    }} catch(e) {{}}
+    try {{
+      const raw=localStorage.getItem(SEGS_KEY);
+      if(raw) return JSON.parse(raw);
+    }} catch(e) {{}}
+    return segs;
+  }}
+
+  function playSeg(i, seek, wantPlay){{
+    segs = readSegs();
+    if(i<0 || i>=segs.length) return;
+    const s=segs[i];
+    if(!s || !s.b64) return;
+    // Same segment already loaded — never reload src mid-play.
+    if(String(audio.dataset.seg)===String(i) && audio.src && audio.src.indexOf("base64,")>=0){{
+      if(seek>0.2){{ try{{ audio.currentTime=seek; }}catch(e){{}} }}
+      if(wantPlay && audio.paused){{ audio.play().catch(function(){{}}); }}
+      return;
+    }}
+    loading=true;
+    state.i=i;
+    audio.dataset.seg=String(i);
+    const onMeta=function(){{
+      audio.removeEventListener("loadedmetadata", onMeta);
+      loading=false;
+      const dur=audio.duration||0;
+      if(seek>0.2 && (!dur || seek<dur)){{
+        try{{ audio.currentTime=seek; }}catch(e){{}}
+      }}
+      if(wantPlay){{ audio.play().catch(function(){{}}); }}
+    }};
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.src="data:"+s.mime+";base64,"+s.b64;
+  }}
+
+  function maybeAdvanceQueue(){{
+    segs = readSegs();
+    if(segs.length === lastLen) return;
+    lastLen = segs.length;
+    if(audio.paused && !loading){{
+      const i=Number(audio.dataset.seg||0);
+      const endedish = audio.ended || (audio.duration && audio.currentTime >= audio.duration - 0.05);
+      if(endedish && (i+1) < segs.length){{
+        playSeg(i+1, 0, true);
+      }} else if((!audio.src || audio.error) && segs.length){{
+        playSeg(Math.min(i, segs.length-1), state.t||0, !!state.playing || AUTO);
+      }}
+    }}
+  }}
+
+  audio.addEventListener("timeupdate", persist);
+  audio.addEventListener("play", function(){{ state.playing=true; persist(); }});
+  audio.addEventListener("pause", persist);
+  audio.addEventListener("ended", function(){{
+    segs = readSegs();
+    const next=Number(audio.dataset.seg||0)+1;
+    if(next<segs.length){{
+      playSeg(next, 0, true);
+    }} else {{
+      state.playing=true; // keep wanting more if progressive still loading
+      persist();
+    }}
+  }});
+
+  segs = readSegs();
+  lastLen = segs.length;
+  if(state.i>=segs.length && segs.length) state.i=Math.max(0, segs.length-1);
+  const resume=state.t>0.2;
+  const wantPlay=!!state.playing || (AUTO && !resume);
+  if(segs.length){{
+    playSeg(state.i||0, state.t||0, wantPlay);
+  }} else if(AUTO){{
+    state.playing=true;
+  }}
+
+  setInterval(maybeAdvanceQueue, 250);
+}})();
+</script></body></html>"""
+    components.html(html, height=52)
+    return True
+
+
+def _render_segment_queue_audio(segments: list, *, autoplay: bool) -> bool:
+    """Legacy one-shot queue player (fallback when persistent split unavailable)."""
+    try:
+        import json
+        import streamlit.components.v1 as components
+    except Exception:
+        return False
+    segs = _segment_payload(segments)
     if not segs:
         return False
 
-    gen = int(st.session_state.get("tts_player_gen") or 0)
-    source = st.session_state.get("tts_source") or "tts"
-    player_id = f"{source}_{gen}"
+    player_id = _progressive_player_id()
     auto_js = "true" if autoplay else "false"
     segs_json = json.dumps(segs, separators=(",", ":"))
     html = f"""<!DOCTYPE html><html><body style="margin:0;background:transparent;">
@@ -554,6 +938,7 @@ def _render_segment_queue_audio(segments: list, *, autoplay: bool) -> bool:
     components.html(html, height=52)
     return True
 
+
 def clear_progressive_tts():
     st.session_state.tts_segments = []
     st.session_state.tts_segment_audios = []
@@ -600,79 +985,38 @@ def speak_vocab_word(
     xtts_voice: str | None = None,
     source: str = "",
 ):
-    """Pronounce one vocabulary word (never section text).
+    """Legacy shared-player vocab path.
 
-    Prefers Edge neural for the book language (fast, reliable on short prompts).
-    Falls back to XTTS word-mode: only ``f"{word}."``, progressive cleared, tighter inference.
+    Prefer ``generate_vocab_word_audio`` + ``render_inline_vocab_audio_button`` so the
+    progressive section player is never remounted. This path still clears progressive
+    and writes ``tts_audio`` when a caller needs the shared bar.
     """
     word = (word or "").strip()
     if not word:
         return
 
     st.session_state.tts_error = ""
-    # Fully yield the player from any growing section playlist / sessionStorage restore.
+    result = generate_vocab_word_audio(word, book_language, tts_rate, xtts_voice=xtts_voice)
+    if not result:
+        if not edge_voice_for_language(book_language) and not st.session_state.get("xtts_speaker_wav"):
+            st.session_state.tts_error = (
+                "Upload a speaker WAV in the sidebar to pronounce words with XTTS "
+                "(or use a language with an Edge voice)."
+            )
+        else:
+            st.session_state.tts_error = f"Could not generate pronunciation for “{word}”."
+        return
+
+    audio_bytes, fmt = result
     clear_progressive_tts()
     st.session_state.tts_segment_audios = []
     st.session_state.tts_segments = []
-    st.session_state.tts_audio = b""
-
     src = source or f"vocab_word:0:{word}"
     st.session_state.tts_source = src
     st.session_state.tts_voice_note = f"Pronouncing: {word}"
+    st.session_state.tts_audio = audio_bytes
+    st.session_state.tts_format = fmt
     _bump_tts_player_gen(src)
-
-    edge_voice = edge_voice_for_language(book_language)
-    cache_word = word  # cache on bare word
-
-    if edge_voice:
-        try:
-            cache_key = _make_tts_cache_key(cache_word, edge_voice, tts_rate, "edge")
-            if cache_key in st.session_state.tts_cache:
-                audio_bytes, fmt = st.session_state.tts_cache[cache_key]
-            else:
-                audio_bytes = _speak_edge(cache_word, edge_voice, tts_rate)
-                fmt = "audio/mp3"
-                _cache_put(cache_key, audio_bytes, fmt)
-            st.session_state.tts_audio = audio_bytes
-            st.session_state.tts_format = fmt
-            return
-        except Exception as e:
-            st.session_state.tts_voice_note = (
-                f"Pronouncing: {word} · Edge unavailable; trying XTTS ({e})"
-            )
-
-    # XTTS word-mode fallback
-    lang = (xtts_voice or "").strip() or XTTS_LANGUAGES.get(book_language) or "en"
-    if not st.session_state.get("xtts_speaker_wav"):
-        st.session_state.tts_error = (
-            "Upload a speaker WAV in the sidebar to pronounce words with XTTS "
-            "(or use a language with an Edge voice)."
-        )
-        return
-
-    # Pass only the isolated word + period — never section context.
-    prompt = word.rstrip(".!?…") + "."
-    cache_key = _make_tts_cache_key(f"vocab:{prompt}", lang, tts_rate, "xtts")
-    try:
-        if cache_key in st.session_state.tts_cache:
-            audio_bytes, fmt = st.session_state.tts_cache[cache_key]
-        else:
-            audio_bytes = _speak_xtts_chunks(
-                [prompt],
-                lang,
-                st.session_state.xtts_speaker_wav,
-                tts_rate,
-                word_mode=True,
-            )
-            fmt = "audio/wav"
-            _cache_put(cache_key, audio_bytes, fmt)
-        st.session_state.tts_audio = audio_bytes
-        st.session_state.tts_format = fmt
-    except Exception as e:
-        import traceback
-        st.session_state.tts_error = (
-            f"TTS error (vocab word): {e}\n\n```\n{traceback.format_exc()}\n```"
-        )
 
 
 def speak_text(
@@ -1033,8 +1377,11 @@ def _advance_progressive_one() -> bool:
     return continue_progressive_tts()
 
 
-def render_tts_player():
-    """Render a single growing TTS player (concat of segments so far)."""
+def render_tts_caption_and_push() -> bool:
+    """Caption / errors / segment push — never mounts the progressive <audio> element.
+
+    Returns True when in progressive / multi-segment mode.
+    """
     if st.session_state.tts_error:
         st.error(st.session_state.tts_error)
         if st.button("Dismiss error", key="btn_dismiss_tts_error"):
@@ -1048,12 +1395,10 @@ def render_tts_player():
     audios = st.session_state.get("tts_segment_audios") or []
     total = len(st.session_state.get("tts_segments") or [])
     done = int(st.session_state.get("tts_segments_done") or 0)
-    just = int(st.session_state.get("tts_progressive_just_added", -1))
     active = bool(st.session_state.get("tts_progressive_active"))
     audio_bytes = st.session_state.get("tts_audio") or b""
     fmt = st.session_state.get("tts_format") or "audio/wav"
 
-    # Progressive / multi-segment: one bar; JS queues segment blobs (no live concat splice)
     if total > 1 and (audios or audio_bytes):
         if audios:
             secs = sum(estimate_audio_seconds(ab, f) for ab, f in audios)
@@ -1065,31 +1410,53 @@ def render_tts_player():
             st.caption(f"Ready · {done}/{total} · ~{int(round(secs))}s")
         else:
             st.caption(f"Loaded {done}/{total} · ~{int(round(secs))}s so far")
+        if audios:
+            _push_segments_to_browser(audios)
+        return True
+    return False
 
-        autoplay = just == 0  # only auto-start on first segment
-        col_audio, col_stop = st.columns([5, 1])
-        with col_audio:
-            used_html = False
-            if audios:
-                used_html = _render_segment_queue_audio(audios, autoplay=autoplay)
-            if not used_html:
-                # Fallback: concat buffer + continuity restore (may stutter on growth)
-                if audios and not audio_bytes:
-                    audio_bytes, fmt = concat_audio_bytes(audios)
-                    st.session_state.tts_audio = audio_bytes
-                    st.session_state.tts_format = fmt
-                used_html = _render_continuity_audio(audio_bytes, fmt, autoplay=autoplay)
-            if not used_html:
-                st.audio(audio_bytes, format=fmt, autoplay=autoplay)
-        with col_stop:
-            if st.button("Stop", key="btn_stop"):
+
+def render_tts_player(*, mount_audio: bool = True):
+    """Render TTS UI.
+
+    When mount_audio is False (polling fragment), only caption + segment push update —
+    the persistent <audio> stays mounted outside the fragment.
+    """
+    progressive = render_tts_caption_and_push()
+    just = int(st.session_state.get("tts_progressive_just_added", -1))
+    audios = st.session_state.get("tts_segment_audios") or []
+    audio_bytes = st.session_state.get("tts_audio") or b""
+    fmt = st.session_state.get("tts_format") or "audio/wav"
+
+    if progressive:
+        autoplay = just == 0
+        if mount_audio:
+            col_audio, col_stop = st.columns([5, 1])
+            with col_audio:
+                used_html = _render_persistent_queue_player(autoplay=autoplay)
+                if not used_html:
+                    used_html = _render_segment_queue_audio(audios, autoplay=autoplay)
+                if not used_html:
+                    if audios and not audio_bytes:
+                        audio_bytes, fmt = concat_audio_bytes(audios)
+                        st.session_state.tts_audio = audio_bytes
+                        st.session_state.tts_format = fmt
+                    used_html = _render_continuity_audio(audio_bytes, fmt, autoplay=autoplay)
+                if not used_html:
+                    st.audio(audio_bytes, format=fmt, autoplay=autoplay)
+            with col_stop:
+                if st.button("Stop", key="btn_stop"):
+                    stop_speech()
+                    st.rerun()
+        else:
+            if st.button("Stop", key="btn_stop_frag"):
                 stop_speech()
                 st.rerun()
         if just >= 0:
             st.session_state.tts_progressive_just_added = -1
         return
 
-    if audio_bytes:
+    if audio_bytes and mount_audio:
         col_audio, col_stop = st.columns([5, 1])
         with col_audio:
             used_html = _render_continuity_audio(audio_bytes, fmt, autoplay=True)
@@ -1102,13 +1469,14 @@ def render_tts_player():
 
 
 def _progressive_fragment_tick():
-    """Show playlist and advance one segment; fragment run_every re-invokes us."""
+    """Advance generation + caption/push only — do NOT remount the audio element."""
     was_active = bool(st.session_state.get("tts_progressive_active"))
-    render_tts_player()
+    render_tts_player(mount_audio=False)
     if st.session_state.get("tts_progressive_active"):
         _advance_progressive_one()
-        # When the last segment finishes, full-rerun so the main script drops
-        # the run_every polling fragment and shows the static playlist.
+        audios = st.session_state.get("tts_segment_audios") or []
+        if audios:
+            _push_segments_to_browser(audios)
         if was_active and not st.session_state.get("tts_progressive_active"):
             st.rerun()
 
@@ -1123,30 +1491,56 @@ if _HAS_FRAGMENT:
         )
     except TypeError:
         _progressive_fragment_polling = st.fragment(_progressive_fragment_tick)
-    _progressive_fragment_static = st.fragment(render_tts_player)
+    _progressive_fragment_static = st.fragment(lambda: render_tts_player(mount_audio=False))
 else:
     _progressive_fragment_polling = None
     _progressive_fragment_static = None
 
 
 def maybe_continue_progressive():
-    """Render TTS UI; when progressive, keep generating via fragment polling."""
+    """Mount persistent audio once; fragment only advances segments + caption."""
+    drain_vocab_prefetch_into_session()
+
     active = bool(st.session_state.get("tts_progressive_active"))
     has_playlist = len(st.session_state.get("tts_segment_audios") or []) > 0 and (
         len(st.session_state.get("tts_segments") or []) > 1
     )
+    audio_bytes = st.session_state.get("tts_audio") or b""
+    just = int(st.session_state.get("tts_progressive_just_added", -1))
 
     if _HAS_FRAGMENT and (active or has_playlist):
+        audios = st.session_state.get("tts_segment_audios") or []
+        if audios:
+            _push_segments_to_browser(audios)
+        autoplay = just == 0
+        col_audio, col_stop = st.columns([5, 1])
+        with col_audio:
+            used = _render_persistent_queue_player(autoplay=autoplay)
+            if not used:
+                used = _render_segment_queue_audio(audios, autoplay=autoplay)
+            if not used and audio_bytes:
+                _render_continuity_audio(
+                    audio_bytes,
+                    st.session_state.get("tts_format") or "audio/wav",
+                    autoplay=True,
+                )
+        with col_stop:
+            if st.button("Stop", key="btn_stop"):
+                stop_speech()
+                st.rerun()
+
         if active and _progressive_fragment_polling is not None:
             _progressive_fragment_polling()
         elif _progressive_fragment_static is not None:
             _progressive_fragment_static()
         else:
-            render_tts_player()
+            render_tts_caption_and_push()
+
+        if just >= 0:
+            st.session_state.tts_progressive_just_added = -1
         return
 
-    # No fragment support: show first clip, then finish remaining in this script run.
-    render_tts_player()
+    render_tts_player(mount_audio=True)
     if not active:
         return
     safety = 0

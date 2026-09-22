@@ -37,10 +37,14 @@ from .tts import (
     _engine_key,
     _get_or_generate_audio,
     _tts_cached,
+    drain_vocab_prefetch_into_session,
+    generate_vocab_word_audio,
+    get_vocab_audio_cached,
     maybe_continue_progressive,
+    prefetch_vocab_audio,
+    render_inline_vocab_audio_button,
     resolve_english_voice,
     speak_text,
-    speak_vocab_word,
     tts_button,
 )
 
@@ -355,7 +359,9 @@ def _render_ll_vocab_table(
     tts_rate: float = 1.0,
     tts_engine: str | None = None,
 ):
-    """Render vocab rows; optional ▶ per Italian/book-language word for pronunciation."""
+    """Render vocab rows with per-word ▶ (inline HTML audio when cached)."""
+    drain_vocab_prefetch_into_session()
+
     # Header
     h_play, h_word, h_trans = st.columns([0.55, 2.2, 3.0])
     with h_play:
@@ -384,18 +390,27 @@ def _render_ll_vocab_table(
         c_play, c_word, c_trans = st.columns([0.55, 2.2, 3.0])
         with c_play:
             if can_speak and word:
-                if st.button("▶", key=f"btn_vocab_word_{i}", help=f"Pronounce: {word}"):
-                    eng = _engine_key(tts_engine)
-                    xtts_lang = tts_voice if eng == "xtts" else None
-                    with st.spinner(f"Pronouncing “{word}”…"):
-                        speak_vocab_word(
-                            word,
-                            book_language,
-                            tts_rate,
-                            xtts_voice=xtts_lang,
-                            source=f"vocab_word:{i}:{word}",
+                cached = get_vocab_audio_cached(word, book_language, tts_rate)
+                if cached:
+                    audio_bytes, fmt = cached
+                    render_inline_vocab_audio_button(
+                        word, audio_bytes, fmt, btn_id=f"vocab_{i}", autoplay=False
+                    )
+                else:
+                    # Not prefetched yet — generate once without page-wide spinner / shared player
+                    if st.button("▶", key=f"btn_vocab_word_{i}", help=f"Pronounce: {word}"):
+                        eng = _engine_key(tts_engine)
+                        xtts_lang = tts_voice if eng == "xtts" else None
+                        result = generate_vocab_word_audio(
+                            word, book_language, tts_rate, xtts_voice=xtts_lang
                         )
-                    st.rerun()
+                        if result:
+                            audio_bytes, fmt = result
+                            render_inline_vocab_audio_button(
+                                word, audio_bytes, fmt, btn_id=f"vocab_play_{i}", autoplay=True
+                            )
+                        else:
+                            st.caption("…")
             else:
                 st.write("")
         with c_word:
@@ -410,7 +425,6 @@ def _render_ll_vocab_table(
                 f'{html.escape(translation)}</div>',
                 unsafe_allow_html=True,
             )
-
 
 
 def _apply_vocab_result(cache_key: str, raw: str) -> list:
@@ -449,10 +463,11 @@ def _render_vocab_parse_fail(cache_key: str, book_language: str, model: str, chu
                 SYSTEM_PROMPT_LL_VOCAB,
                 num_predict=512,
             )
-            _apply_vocab_result(cache_key, raw)
+            vocab = _apply_vocab_result(cache_key, raw)
         # Fall through: successful parse shows table in same run via session state
         if st.session_state.ll_vocab:
             st.session_state.ll_vocab_parse_fail = None
+            prefetch_vocab_audio(st.session_state.ll_vocab, book_language, 1.0)
         st.rerun()
     return True
 
@@ -556,7 +571,9 @@ def _render_ll_ai_controls(
                     raw_vocab = fut_vocab.result()
                 st.session_state.ll_summary = summary
                 st.session_state.ll_summary_cache[cache_key] = summary
-                _apply_vocab_result(cache_key, raw_vocab)
+                vocab = _apply_vocab_result(cache_key, raw_vocab)
+                if vocab:
+                    prefetch_vocab_audio(vocab, book_language, tts_rate)
             # Prefer showing results in the same run (state already set); soft rerun
             # only if we need widgets to flip from button → content cleanly.
             st.rerun()
@@ -620,20 +637,8 @@ def _render_ll_ai_controls(
             tts_rate=tts_rate,
             tts_engine=tts_engine,
         )
-        st.caption(
-            "▶ plays the word alone (book-language voice). "
-            "Read vocabulary concatenates words + English translations into one track."
-        )
-        tts_button(
-            "Read vocabulary",
-            "",  # unused when bilingual_vocab set
-            "ll_vocab",
-            tts_voice,
-            tts_rate,
-            tts_engine,
-            bilingual_vocab=st.session_state.ll_vocab,
-            voice_note="Vocabulary: book-language words + English translations",
-        )
+        st.caption("▶ plays each word alone (book-language voice; prefetched when available).")
+        prefetch_vocab_audio(st.session_state.ll_vocab, book_language, tts_rate)
     elif _render_vocab_parse_fail(cache_key, book_language, model, chunk["text"]):
         pass  # warning + retry already rendered
     else:
@@ -656,20 +661,8 @@ def _render_ll_ai_controls(
                     tts_rate=tts_rate,
                     tts_engine=tts_engine,
                 )
-                st.caption(
-                    "▶ plays the word alone (book-language voice). "
-                    "Read vocabulary concatenates words + English translations into one track."
-                )
-                tts_button(
-                    "Read vocabulary",
-                    "",
-                    "ll_vocab",
-                    tts_voice,
-                    tts_rate,
-                    tts_engine,
-                    bilingual_vocab=vocab,
-                    voice_note="Vocabulary: book-language words + English translations",
-                )
+                st.caption("▶ plays each word alone (book-language voice; prefetched when available).")
+                prefetch_vocab_audio(vocab, book_language, tts_rate)
             else:
                 _render_vocab_parse_fail(cache_key, book_language, model, chunk["text"])
 

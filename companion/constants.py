@@ -82,6 +82,8 @@ DEFAULTS = {
     "tts_progressive_just_added": -1,
     "tts_player_gen": 0,
     "tts_voice_note": "",
+    # Per-word vocab pronunciation cache: (word, lang, voice) -> (bytes, mime)
+    "vocab_audio_cache": {},
     "audiobook_bytes": b"",
     "audiobook_ext": "wav",
     "xtts_speaker_wav": b"",
