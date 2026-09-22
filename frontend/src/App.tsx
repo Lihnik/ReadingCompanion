@@ -392,7 +392,7 @@ export default function App() {
           </label>
         )}
 
-                {engine === 'Piper Italian' && (
+        {engine === 'Piper Italian' && (
           <div className="muted" style={{ marginTop: '-0.35rem', marginBottom: '0.75rem' }}>
             Dedicated Italian Piper voice: Paola (it_IT medium)
             {voices && voices.piper_italian_available === false && (
@@ -402,8 +402,6 @@ export default function App() {
                 until then.
               </div>
             )}
-          </div>
-        )}
           </div>
         )}
 
