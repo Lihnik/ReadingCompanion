@@ -34,10 +34,12 @@ from .ollama import (
 from .hero import render_landing_hero, render_ambient_bg_html
 from .parsing import parse_epub, parse_pdf
 from .tts import (
+    _engine_key,
     _get_or_generate_audio,
     _tts_cached,
     maybe_continue_progressive,
     resolve_english_voice,
+    speak_text,
     tts_button,
 )
 
@@ -345,25 +347,68 @@ def _render_ll_summary_body(summary: str):
     )
 
 
-def _render_ll_vocab_table(vocab: list, book_language: str):
-    rows = "".join(
-        f'<tr>'
-        f'<td style="padding:.45rem .75rem;font-weight:600;color:rgba(255,220,130,0.95);">{html.escape(v["word"])}</td>'
-        f'<td style="padding:.45rem .75rem;color:rgba(210,225,248,0.90);">{html.escape(v["translation"])}</td>'
-        f'</tr>'
-        for v in vocab
-    )
-    st.markdown(
-        f'<div style="{_GLASS}">'
-        f'<table style="width:100%;border-collapse:collapse;">'
-        f'<thead><tr>'
-        f'<th style="text-align:left;padding:.4rem .75rem;font-size:.75rem;letter-spacing:.08em;'
-        f'text-transform:uppercase;color:rgba(180,180,200,0.7);">{html.escape(book_language)}</th>'
-        f'<th style="text-align:left;padding:.4rem .75rem;font-size:.75rem;letter-spacing:.08em;'
-        f'text-transform:uppercase;color:rgba(180,180,200,0.7);">English</th>'
-        f'</tr></thead><tbody>{rows}</tbody></table></div>',
-        unsafe_allow_html=True,
-    )
+def _render_ll_vocab_table(
+    vocab: list,
+    book_language: str,
+    tts_voice: str | None = None,
+    tts_rate: float = 1.0,
+    tts_engine: str | None = None,
+):
+    """Render vocab rows; optional ▶ per Italian/book-language word for pronunciation."""
+    # Header
+    h_play, h_word, h_trans = st.columns([0.55, 2.2, 3.0])
+    with h_play:
+        st.markdown(
+            f'<div style="font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;'
+            f'color:rgba(180,180,200,0.7);padding:.35rem 0;">▶</div>',
+            unsafe_allow_html=True,
+        )
+    with h_word:
+        st.markdown(
+            f'<div style="font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;'
+            f'color:rgba(180,180,200,0.7);padding:.35rem 0;">{html.escape(book_language)}</div>',
+            unsafe_allow_html=True,
+        )
+    with h_trans:
+        st.markdown(
+            '<div style="font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;'
+            'color:rgba(180,180,200,0.7);padding:.35rem 0;">English</div>',
+            unsafe_allow_html=True,
+        )
+
+    can_speak = bool(tts_voice is not None and tts_engine is not None)
+    for i, v in enumerate(vocab):
+        word = (v.get("word") or "").strip()
+        translation = (v.get("translation") or "").strip()
+        c_play, c_word, c_trans = st.columns([0.55, 2.2, 3.0])
+        with c_play:
+            if can_speak and word:
+                if st.button("▶", key=f"btn_vocab_word_{i}", help=f"Pronounce: {word}"):
+                    eng = _engine_key(tts_engine)
+                    with st.spinner(f"Pronouncing “{word}”…"):
+                        speak_text(
+                            word,
+                            tts_voice,
+                            tts_rate,
+                            eng,
+                            source=f"vocab_word_{i}",
+                            progressive=False,
+                        )
+                    st.rerun()
+            else:
+                st.write("")
+        with c_word:
+            st.markdown(
+                f'<div style="padding:.35rem 0;font-weight:600;color:rgba(255,220,130,0.95);">'
+                f'{html.escape(word)}</div>',
+                unsafe_allow_html=True,
+            )
+        with c_trans:
+            st.markdown(
+                f'<div style="padding:.35rem 0;color:rgba(210,225,248,0.90);">'
+                f'{html.escape(translation)}</div>',
+                unsafe_allow_html=True,
+            )
 
 
 
@@ -531,15 +576,23 @@ def _render_ll_ai_controls(
             st.rerun()
     else:
         _render_ll_summary_body(st.session_state.ll_summary)
-        # English summary must not use Italian XTTS — auto-route to English voice
+        # English summary: Kokoro (fast) when sidebar is XTTS; never Italian XTTS
         eng_engine, eng_voice, _ = resolve_english_voice(tts_engine, tts_voice)
         voice_note = None
         engine_override = None
         voice_override = None
+        use_fallback_edge = False
         if eng_engine != tts_engine or eng_voice != tts_voice:
             engine_override = eng_engine
             voice_override = eng_voice
-            voice_note = f"Summary uses English voice ({eng_engine})"
+            if eng_engine == "Kokoro":
+                voice_note = "Summary uses English voice (Kokoro)"
+                use_fallback_edge = True
+            else:
+                voice_note = f"Summary uses English voice ({eng_engine})"
+            st.caption(voice_note)
+        elif eng_engine == "Kokoro":
+            voice_note = "Summary uses English voice (Kokoro)"
             st.caption(voice_note)
         tts_button(
             "Read summary",
@@ -552,14 +605,24 @@ def _render_ll_ai_controls(
             voice_override=voice_override,
             voice_note=voice_note,
             progressive=True,
+            fallback_edge=use_fallback_edge,
         )
 
     st.markdown("---")
 
     st.markdown("**Vocabulary**")
     if st.session_state.ll_vocab:
-        _render_ll_vocab_table(st.session_state.ll_vocab, book_language)
-        st.caption("Words use book-language voice; translations use English (Edge).")
+        _render_ll_vocab_table(
+            st.session_state.ll_vocab,
+            book_language,
+            tts_voice=tts_voice,
+            tts_rate=tts_rate,
+            tts_engine=tts_engine,
+        )
+        st.caption(
+            "▶ plays the word alone (book-language voice). "
+            "Read vocabulary concatenates words + English translations into one track."
+        )
         tts_button(
             "Read vocabulary",
             "",  # unused when bilingual_vocab set
@@ -585,8 +648,17 @@ def _render_ll_ai_controls(
                 vocab = _apply_vocab_result(cache_key, raw)
             if vocab:
                 # Show table in the same run — avoid rerun-with-empty-cache flicker
-                _render_ll_vocab_table(vocab, book_language)
-                st.caption("Words use book-language voice; translations use English (Edge).")
+                _render_ll_vocab_table(
+                    vocab,
+                    book_language,
+                    tts_voice=tts_voice,
+                    tts_rate=tts_rate,
+                    tts_engine=tts_engine,
+                )
+                st.caption(
+                    "▶ plays the word alone (book-language voice). "
+                    "Read vocabulary concatenates words + English translations into one track."
+                )
                 tts_button(
                     "Read vocabulary",
                     "",

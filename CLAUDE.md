@@ -63,13 +63,17 @@ Default Streamlit port is 8501. The app opens automatically in the browser.
   language stays synced with `ll_book_language`. Vocab prompt asks for JSON
   `[{word,translation}]`; `parse_vocab_response` also accepts WORD:/TRANSLATION:
   blocks, bullets, inline separators, and markdown tables. **Never cache an empty
-  parse** — show warning + raw preview + Retry. English summary TTS auto-routes
-  to Edge English when sidebar is XTTS; vocab TTS is bilingual (XTTS word + Edge
-  translation).
+  parse** — show warning + raw preview + Retry. English summary TTS uses Kokoro
+  (`af_heart`) when sidebar is XTTS (Edge fallback if Kokoro missing); vocab has
+  per-word ▶ (XTTS one-shot) plus bilingual “Read vocabulary” playlist
+  (XTTS word + Edge translation) collapsed to one concatenated track.
 - **Progressive TTS**: `speak_text` / `tts_button` split long text (XTTS ~200
   chars); first segment plays ASAP; remaining segments continue via
-  `@st.fragment(run_every=…)` playlist. Session keys: `tts_segments`,
-  `tts_segment_audios`, `tts_progressive_*`. Cache capped at `TTS_CACHE_MAX_ENTRIES`.
+  `@st.fragment(run_every=…)` and are **concatenated into one growing `tts_audio`
+  buffer** (single player + `Loaded N/M` caption; HTML `<audio>` restores
+  `currentTime` across remounts). Session keys: `tts_segments`,
+  `tts_segment_audios`, `tts_progressive_*`, `tts_player_gen`. Cache capped at
+  `TTS_CACHE_MAX_ENTRIES`.
 - **Ollama GPU**: model residency/GPU is via Ollama (`ollama ps`), not Streamlit.
   `call_ollama` uses short `num_predict` defaults (~512) and `keep_alive="10m"`
 - **Ollama models**: sidebar selectbox is driven by `fetch_ollama_models()` (`/api/tags`);

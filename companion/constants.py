@@ -80,6 +80,7 @@ DEFAULTS = {
     "tts_progressive_active": False,
     "tts_progressive_meta": {},
     "tts_progressive_just_added": -1,
+    "tts_player_gen": 0,
     "tts_voice_note": "",
     "audiobook_bytes": b"",
     "audiobook_ext": "wav",

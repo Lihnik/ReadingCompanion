@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import io
 import re
@@ -313,6 +314,137 @@ def _generate_one(processed: str, voice: str, rate: float, engine: str) -> tuple
     return audio_bytes, fmt
 
 
+
+def concat_audio_bytes(parts: list) -> tuple[bytes, str]:
+    """Concatenate segment (bytes, mime) pairs into one audio buffer.
+
+    WAV engines (XTTS/Kokoro): soundfile/numpy PCM concat.
+    MP3 (Edge): pydub concat when available — never raw-byte-join MP3 frames.
+    """
+    if not parts:
+        return b"", "audio/wav"
+    if len(parts) == 1:
+        return parts[0][0], parts[0][1]
+
+    all_wav = all("wav" in (fmt or "") for _, fmt in parts)
+    if all_wav:
+        import numpy as np
+        import soundfile as sf
+
+        arrays = []
+        sr = 24000
+        for ab, _ in parts:
+            data, sr = sf.read(io.BytesIO(ab))
+            arrays.append(data)
+        out = io.BytesIO()
+        sf.write(out, np.concatenate(arrays), int(sr), format="WAV")
+        return out.getvalue(), "audio/wav"
+
+    try:
+        from pydub import AudioSegment
+    except ImportError as e:
+        raise RuntimeError(
+            "pydub is required to concatenate Edge/MP3 progressive clips. "
+            "Install pydub (and ffmpeg on PATH), or use Kokoro/XTTS for progressive TTS."
+        ) from e
+
+    combined = None
+    for ab, fmt in parts:
+        fmt_l = (fmt or "").lower()
+        file_fmt = "wav" if "wav" in fmt_l else "mp3"
+        seg = AudioSegment.from_file(io.BytesIO(ab), format=file_fmt)
+        combined = seg if combined is None else combined + seg
+    out = io.BytesIO()
+    combined.export(out, format="mp3")
+    return out.getvalue(), "audio/mp3"
+
+
+def estimate_audio_seconds(audio_bytes: bytes, fmt: str) -> float:
+    """Best-effort duration in seconds for caption display."""
+    if not audio_bytes:
+        return 0.0
+    try:
+        if "wav" in (fmt or ""):
+            import soundfile as sf
+
+            data, sr = sf.read(io.BytesIO(audio_bytes))
+            return float(len(data)) / float(sr or 24000)
+        from pydub import AudioSegment
+
+        file_fmt = "mp3" if "mp3" in (fmt or "") else "wav"
+        seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format=file_fmt)
+        return len(seg) / 1000.0
+    except Exception:
+        if "wav" in (fmt or ""):
+            return max(0.0, (len(audio_bytes) - 44) / 48000.0)
+        return max(0.0, len(audio_bytes) / 16000.0)
+
+
+def _rebuild_concat_audio() -> None:
+    """Set tts_audio/tts_format to the concatenation of all segments so far."""
+    audios = st.session_state.get("tts_segment_audios") or []
+    if not audios:
+        st.session_state.tts_audio = b""
+        return
+    audio_bytes, fmt = concat_audio_bytes(audios)
+    st.session_state.tts_audio = audio_bytes
+    st.session_state.tts_format = fmt
+
+
+def _bump_tts_player_gen(source: str = "") -> None:
+    st.session_state.tts_player_gen = int(st.session_state.get("tts_player_gen") or 0) + 1
+    st.session_state.tts_player_source = source or st.session_state.get("tts_source") or ""
+
+
+def _render_continuity_audio(audio_bytes: bytes, fmt: str, *, autoplay: bool) -> bool:
+    """Render one <audio> element that restores playback position across remounts.
+
+    Returns True if the HTML component rendered; False to fall back to st.audio.
+    """
+    try:
+        import streamlit.components.v1 as components
+    except Exception:
+        return False
+    if not audio_bytes:
+        return False
+
+    mime = fmt if "/" in (fmt or "") else f"audio/{fmt or 'wav'}"
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    gen = int(st.session_state.get("tts_player_gen") or 0)
+    source = st.session_state.get("tts_source") or "tts"
+    player_id = f"{source}_{gen}"
+    auto_js = "true" if autoplay else "false"
+    # base64 charset is URL/JS-safe; keep script compact for iframe height
+    html = f"""<!DOCTYPE html><html><body style="margin:0;background:transparent;">
+<audio id="a" controls style="width:100%;height:40px;"></audio>
+<script>
+(function(){{
+  const KEY="rc_tts_"+{player_id!r};
+  const AUTO={auto_js};
+  const audio=document.getElementById("a");
+  let state={{t:0,playing:false}};
+  try{{ const raw=sessionStorage.getItem(KEY); if(raw) state=JSON.parse(raw); }}catch(e){{}}
+  function persist(){{
+    try{{ sessionStorage.setItem(KEY, JSON.stringify({{t:audio.currentTime||0, playing:!audio.paused}})); }}catch(e){{}}
+  }}
+  audio.addEventListener("timeupdate", persist);
+  audio.addEventListener("play", persist);
+  audio.addEventListener("pause", persist);
+  audio.src="data:{mime};base64,{b64}";
+  audio.addEventListener("loadedmetadata", function(){{
+    const dur=audio.duration||0;
+    const resume=state.t>0.2 && (!dur || state.t<dur);
+    if(resume){{ try{{ audio.currentTime=state.t; }}catch(e){{}} }}
+    if(state.playing || (AUTO && !resume)){{
+      audio.play().catch(function(){{}});
+    }}
+  }});
+}})();
+</script></body></html>"""
+    components.html(html, height=52)
+    return True
+
+
 def clear_progressive_tts():
     st.session_state.tts_segments = []
     st.session_state.tts_segment_audios = []
@@ -326,6 +458,7 @@ def stop_speech():
     st.session_state.tts_audio = b""
     st.session_state.tts_source = ""
     st.session_state.tts_voice_note = ""
+    st.session_state.tts_player_gen = int(st.session_state.get("tts_player_gen") or 0) + 1
     clear_progressive_tts()
 
 
@@ -333,14 +466,15 @@ def resolve_english_voice(tts_engine: str, tts_voice: str) -> tuple[str, str, st
     """Pick an English-capable engine/voice for English content.
 
     Returns (display_engine, voice_id, engine_key).
-    Prefers keeping Kokoro/Edge if already selected; swaps XTTS → Edge English.
+    Prefers keeping Kokoro/Edge if already selected; swaps XTTS → Kokoro English
+    (af_heart). Callers should fall back to Edge if Kokoro is unavailable.
     """
     if tts_engine == "Kokoro":
         return "Kokoro", tts_voice, "kokoro"
     if tts_engine == "Edge TTS":
         return "Edge TTS", tts_voice, "edge"
-    # XTTS (or unknown): route English content to Edge
-    return "Edge TTS", DEFAULT_EN_EDGE_VOICE, "edge"
+    # XTTS (or unknown): prefer local Kokoro English voice
+    return "Kokoro", DEFAULT_EN_KOKORO_VOICE, "kokoro"
 
 
 def speak_text(
@@ -350,8 +484,12 @@ def speak_text(
     engine: str = "edge",
     source: str = "",
     progressive: bool = True,
+    fallback_edge: bool = False,
 ):
-    """Generate TTS. For long text, start progressive playback (first segment ASAP)."""
+    """Generate TTS. For long text, start progressive playback (first segment ASAP).
+
+    If fallback_edge and Kokoro fails (missing deps), retry once with Edge English.
+    """
     st.session_state.tts_error = ""
     processed = _preprocess_tts_text(text)
     if not processed:
@@ -359,6 +497,13 @@ def speak_text(
 
     segments = split_for_tts(processed, engine) if progressive else [processed]
     use_progressive = progressive and len(segments) >= TTS_PROGRESSIVE_MIN_SEGMENTS
+
+    # Edge MP3 progressive needs pydub for safe concat — otherwise one-shot.
+    if use_progressive and engine == "edge":
+        try:
+            from pydub import AudioSegment  # noqa: F401
+        except ImportError:
+            use_progressive = False
 
     if not use_progressive:
         # Full one-shot (short text or progressive disabled)
@@ -369,6 +514,7 @@ def speak_text(
             st.session_state.tts_format = fmt
             st.session_state.tts_source = source
             clear_progressive_tts()
+            _bump_tts_player_gen(source)
             return
         try:
             if engine == "kokoro":
@@ -388,13 +534,31 @@ def speak_text(
             st.session_state.tts_format = fmt
             st.session_state.tts_source = source
             clear_progressive_tts()
+            _bump_tts_player_gen(source)
         except Exception as e:
+            if fallback_edge and engine == "kokoro":
+                st.session_state.tts_voice_note = (
+                    (st.session_state.get("tts_voice_note") or "")
+                    + (" · " if st.session_state.get("tts_voice_note") else "")
+                    + f"Kokoro unavailable; using Edge English ({e})"
+                ).strip(" ·")
+                speak_text(
+                    text,
+                    DEFAULT_EN_EDGE_VOICE,
+                    rate,
+                    "edge",
+                    source=source,
+                    progressive=progressive,
+                    fallback_edge=False,
+                )
+                return
             import traceback
             st.session_state.tts_error = f"TTS error ({engine}): {e}\n\n```\n{traceback.format_exc()}\n```"
         return
 
     # Progressive path: generate segment 0 now; continue on later runs
     clear_progressive_tts()
+    _bump_tts_player_gen(source)
     st.session_state.tts_segments = segments
     st.session_state.tts_segment_audios = []
     st.session_state.tts_segments_done = 0
@@ -414,6 +578,23 @@ def speak_text(
         st.session_state.tts_progressive_just_added = 0
         st.session_state.tts_progressive_active = len(segments) > 1
     except Exception as e:
+        if fallback_edge and engine == "kokoro":
+            clear_progressive_tts()
+            st.session_state.tts_voice_note = (
+                (st.session_state.get("tts_voice_note") or "")
+                + (" · " if st.session_state.get("tts_voice_note") else "")
+                + f"Kokoro unavailable; using Edge English ({e})"
+            ).strip(" ·")
+            speak_text(
+                text,
+                DEFAULT_EN_EDGE_VOICE,
+                rate,
+                "edge",
+                source=source,
+                progressive=progressive,
+                fallback_edge=False,
+            )
+            return
         import traceback
         st.session_state.tts_error = f"TTS error ({engine}): {e}\n\n```\n{traceback.format_exc()}\n```"
         clear_progressive_tts()
@@ -441,8 +622,8 @@ def continue_progressive_tts() -> bool:
         st.session_state.tts_segment_audios.append((audio_bytes, fmt))
         st.session_state.tts_segments_done = done + 1
         st.session_state.tts_progressive_just_added = done
-        # Keep tts_audio as first clip so the initial player isn't disrupted;
-        # playlist UI renders additional clips separately.
+        # Grow the single playback buffer (concat of all segments so far).
+        _rebuild_concat_audio()
         if done + 1 >= len(segments):
             st.session_state.tts_progressive_active = False
             return False
@@ -534,6 +715,7 @@ def speak_bilingual_vocab(
     }
     st.session_state.tts_source = source
     st.session_state.tts_voice_note = "Vocabulary: book-language words + English translations"
+    _bump_tts_player_gen(source)
 
     try:
         text0, voice0, eng0 = jobs[0]
@@ -565,6 +747,7 @@ def continue_progressive_tts_bilingual(rate: float) -> bool:
         st.session_state.tts_segment_audios.append((audio_bytes, fmt))
         st.session_state.tts_segments_done = done + 1
         st.session_state.tts_progressive_just_added = done
+        _rebuild_concat_audio()
         if done + 1 >= len(jobs):
             st.session_state.tts_progressive_active = False
             return False
@@ -589,11 +772,13 @@ def tts_button(
     voice_note: str | None = None,
     progressive: bool = True,
     bilingual_vocab: list | None = None,
+    fallback_edge: bool = False,
 ):
     """Render a read-aloud button.
 
     Optional overrides route English content away from a non-English XTTS setup.
     If bilingual_vocab is provided, uses alternating book/English clips.
+    fallback_edge: if Kokoro fails, retry with Edge English (for summary TTS).
     """
     engine_label = engine_override or tts_engine
     voice = voice_override if voice_override is not None else tts_voice
@@ -618,7 +803,10 @@ def tts_button(
 
         cached = _tts_cached(text, voice, tts_rate, engine_key)
         if cached:
-            speak_text(text, voice, tts_rate, engine_key, source=source, progressive=progressive)
+            speak_text(
+                text, voice, tts_rate, engine_key,
+                source=source, progressive=progressive, fallback_edge=fallback_edge,
+            )
         else:
             spinner_msg = (
                 "Generating first audio…"
@@ -626,7 +814,10 @@ def tts_button(
                 else "Generating audio..."
             )
             with st.spinner(spinner_msg):
-                speak_text(text, voice, tts_rate, engine_key, source=source, progressive=progressive)
+                speak_text(
+                    text, voice, tts_rate, engine_key,
+                    source=source, progressive=progressive, fallback_edge=fallback_edge,
+                )
         st.rerun()
 
 
@@ -644,7 +835,7 @@ def _advance_progressive_one() -> bool:
 
 
 def render_tts_player():
-    """Render the active TTS player(s), including progressive playlist clips."""
+    """Render a single growing TTS player (concat of segments so far)."""
     if st.session_state.tts_error:
         st.error(st.session_state.tts_error)
         if st.button("Dismiss error", key="btn_dismiss_tts_error"):
@@ -660,28 +851,40 @@ def render_tts_player():
     done = int(st.session_state.get("tts_segments_done") or 0)
     just = int(st.session_state.get("tts_progressive_just_added", -1))
     active = bool(st.session_state.get("tts_progressive_active"))
+    audio_bytes = st.session_state.get("tts_audio") or b""
+    fmt = st.session_state.get("tts_format") or "audio/wav"
 
-    if total > 1 and audios:
+    # Progressive / multi-segment: one bar that grows as chunks append
+    if total > 1 and (audios or audio_bytes):
+        secs = estimate_audio_seconds(audio_bytes, fmt)
         if active:
-            st.caption(f"Generating remaining audio… {done}/{total}")
-        elif done >= total:
-            st.caption(f"All {total} audio parts ready")
+            st.caption(f"Loaded {done}/{total} · ~{int(round(secs))}s so far")
+        elif done >= total > 0:
+            st.caption(f"Ready · {done}/{total} · ~{int(round(secs))}s")
+        else:
+            st.caption(f"Loaded {done}/{total} · ~{int(round(secs))}s so far")
 
-        for i, (audio_bytes, fmt) in enumerate(audios):
-            st.caption(f"Part {i + 1}")
-            # Only autoplay the first clip so later parts don't interrupt listening.
-            st.audio(audio_bytes, format=fmt, autoplay=(i == 0 and just == 0))
-        if just == 0:
-            st.session_state.tts_progressive_just_added = -1
-        if st.button("Stop", key="btn_stop"):
-            stop_speech()
-            st.rerun()
-        return
-
-    if st.session_state.tts_audio:
+        autoplay = just == 0  # only auto-start on first segment
         col_audio, col_stop = st.columns([5, 1])
         with col_audio:
-            st.audio(st.session_state.tts_audio, format=st.session_state.tts_format, autoplay=True)
+            used_html = _render_continuity_audio(audio_bytes, fmt, autoplay=autoplay)
+            if not used_html:
+                # Fallback: single st.audio (may reset seek on remount when buffer grows)
+                st.audio(audio_bytes, format=fmt, autoplay=autoplay)
+        with col_stop:
+            if st.button("Stop", key="btn_stop"):
+                stop_speech()
+                st.rerun()
+        if just >= 0:
+            st.session_state.tts_progressive_just_added = -1
+        return
+
+    if audio_bytes:
+        col_audio, col_stop = st.columns([5, 1])
+        with col_audio:
+            used_html = _render_continuity_audio(audio_bytes, fmt, autoplay=True)
+            if not used_html:
+                st.audio(audio_bytes, format=fmt, autoplay=True)
         with col_stop:
             if st.button("Stop", key="btn_stop"):
                 stop_speech()
