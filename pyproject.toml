@@ -27,6 +27,12 @@ xtts = [
     "huggingface_hub",
     "transformers>=4.33.0,<5.0",
 ]
+mms = [
+    "transformers>=4.33.0,<5.0",
+    "torch",
+    "torchaudio",
+    "soundfile",
+]
 
 [tool.setuptools.packages.find]
 include = ["companion*"]

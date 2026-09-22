@@ -291,11 +291,18 @@ export async function fetchWordAudio(
   language: string,
   speaker_key?: string | null,
   rate = 1.0,
+  engine?: string | null,
 ) {
   const res = await fetch(`${BASE}/api/tts/word`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ word, language, speaker_key: speaker_key || undefined, rate }),
+    body: JSON.stringify({
+      word,
+      language,
+      speaker_key: speaker_key || undefined,
+      rate,
+      engine: engine || undefined,
+    }),
   });
   if (!res.ok) {
     const t = await res.text();
@@ -309,6 +316,7 @@ export async function listVoices() {
     edge: Record<string, string>;
     kokoro: Record<string, string>;
     xtts_languages: Record<string, string>;
+    mms_italian?: Record<string, string>;
     edge_lang_voices?: Record<string, string>;
   }>(await fetch(`${BASE}/api/tts/voices`));
 }

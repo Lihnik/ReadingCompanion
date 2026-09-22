@@ -175,3 +175,9 @@ XTTS_LANGUAGES = {
     "Korean": "ko",
     "Hungarian": "hu",
 }
+
+# Facebook MMS-TTS Italian (VITS). Single dedicated voice; no speaker cloning.
+MMS_ITALIAN_VOICES = {
+    "MMS Italian (ita)": "ita",
+}
+

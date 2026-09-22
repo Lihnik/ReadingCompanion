@@ -19,3 +19,9 @@ pydub
 # coqui-tts[codec]
 # huggingface_hub
 # transformers>=4.33.0,<5.0
+
+# Optional: Facebook MMS-TTS Italian (VITS via transformers)
+#   pip install transformers torch torchaudio
+#   # or: pip install ".[mms]"
+# First run downloads facebook/mms-tts-ita from Hugging Face.
+

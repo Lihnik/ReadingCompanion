@@ -40,7 +40,7 @@ const LANGS = [
   'Hungarian',
 ];
 
-const ENGINES = ['Edge TTS', 'Kokoro', 'XTTS'] as const;
+const ENGINES = ['Edge TTS', 'Kokoro', 'XTTS', 'MMS Italian'] as const;
 type AppMode = 'language_learning' | 'reading';
 
 export default function App() {
@@ -55,6 +55,7 @@ export default function App() {
     edge: Record<string, string>;
     kokoro: Record<string, string>;
     xtts_languages: Record<string, string>;
+    mms_italian?: Record<string, string>;
   } | null>(null);
   const [voice, setVoice] = useState('Aria (US, Female)');
   const [speakerKey, setSpeakerKey] = useState<string | null>(null);
@@ -104,6 +105,9 @@ export default function App() {
       if (keys.length) setVoice(keys[0]);
     } else if (engine === 'Kokoro') {
       const keys = Object.keys(voices.kokoro);
+      if (keys.length) setVoice(keys[0]);
+    } else if (engine === 'MMS Italian') {
+      const keys = Object.keys(voices.mms_italian || { 'MMS Italian (ita)': 'ita' });
       if (keys.length) setVoice(keys[0]);
     } else {
       setVoice(language in voices.xtts_languages ? language : 'Italian');
@@ -254,11 +258,11 @@ export default function App() {
   const playWord = async (word: string) => {
     setWordBusy(word);
     try {
-      let url = wordCache.get(`${language}|${word}|${rate}`);
+      let url = wordCache.get(`${language}|${word}|${rate}|${engine}`);
       if (!url) {
-        const blob = await fetchWordAudio(word, language, speakerKey, rate);
+        const blob = await fetchWordAudio(word, language, speakerKey, rate, engine);
         url = URL.createObjectURL(blob);
-        wordCache.set(`${language}|${word}|${rate}`, url);
+        wordCache.set(`${language}|${word}|${rate}|${engine}`, url);
       }
       const audio = new Audio(url);
       await audio.play();
@@ -273,6 +277,9 @@ export default function App() {
     if (!voices) return [] as string[];
     if (engine === 'Edge TTS') return Object.keys(voices.edge);
     if (engine === 'Kokoro') return Object.keys(voices.kokoro);
+    if (engine === 'MMS Italian') {
+      return Object.keys(voices.mms_italian || { 'MMS Italian (ita)': 'ita' });
+    }
     return Object.keys(voices.xtts_languages);
   }, [engine, voices]);
 
@@ -382,6 +389,12 @@ export default function App() {
             <input type="file" accept=".wav,audio/*" onChange={(e) => onSpeaker(e.target.files?.[0] ?? null)} />
             {speakerKey ? <span className="ok">Speaker ready</span> : <span className="muted">Required for XTTS</span>}
           </label>
+        )}
+
+        {engine === 'MMS Italian' && (
+          <div className="muted" style={{ marginTop: '-0.35rem', marginBottom: '0.75rem' }}>
+            Dedicated Italian (facebook/mms-tts-ita)
+          </div>
         )}
 
         <div className="nav-row">

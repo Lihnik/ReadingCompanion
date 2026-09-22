@@ -8,7 +8,7 @@ Additive React rewrite of the Streamlit app. The classic Streamlit entrypoint (`
 /backend          FastAPI app (uvicorn)
   app/main.py
   app/routers/    books, ai, tts, ollama
-/companion/       Shared engines (PDF/EPUB, Ollama, Edge/Kokoro/XTTS)
+/companion/       Shared engines (PDF/EPUB, Ollama, Edge/Kokoro/XTTS/MMS Italian)
 /frontend         Vite + React + TypeScript
 ```
 
@@ -19,7 +19,7 @@ Repo root is added to `PYTHONPATH` so FastAPI can `import companion…`.
 - Python **3.10–3.12** preferred (Kokoro needs `<3.13`); 3.13 works for Edge TTS + API smoke tests
 - Node.js 18+ (for Vite)
 - [Ollama](https://ollama.com/) for AI (`ollama serve`, then `ollama pull llama3.1:8b`)
-- Optional: espeak-ng (Kokoro), ffmpeg (Edge concat / mic convert), coqui-tts (XTTS), pydub (Edge MP3 concat for audiobook)
+- Optional: espeak-ng (Kokoro), ffmpeg (Edge concat / mic convert), coqui-tts (XTTS), transformers+torch (MMS Italian), pydub (Edge MP3 concat for audiobook)
 
 ## Setup
 
@@ -31,6 +31,9 @@ python3.12 -m venv .venv          # or python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-api.txt
 # Optional XTTS: pip install ".[xtts]"
+# Optional MMS Italian TTS: pip install ".[mms]"
+#   (or: pip install transformers torch torchaudio)
+#   First run downloads facebook/mms-tts-ita from Hugging Face (~hundreds of MB).
 ```
 
 ### Backend (Windows PowerShell)
@@ -84,6 +87,20 @@ python -m streamlit run reading_companion.py
 
 ## Features
 
+### MMS Italian TTS
+
+Dedicated Italian voice via Hugging Face `facebook/mms-tts-ita` (VITS / `transformers.VitsModel`).
+
+```bash
+pip install transformers torch torchaudio
+# or: pip install ".[mms]"
+```
+
+- Select **MMS Italian** in the sidebar TTS engine list (no speaker WAV).
+- First run downloads the model from Hugging Face and caches it locally.
+- Speed slider uses approximate resampling (no native rate; pitch shifts with speed).
+
+
 ### Modes
 
 - **Language Learning** — English summary, vocabulary (+ ▶), Prepare, progressive read-aloud
@@ -92,7 +109,7 @@ python -m streamlit run reading_companion.py
 ### Shared
 
 - Streaming **chat** (SSE) grounded in the current section; “Read last response” via progressive TTS
-- Sidebar: Ollama model picker, TTS engine (Edge / Kokoro / XTTS), voice/lang, rate, XTTS speaker WAV, book language (LL)
+- Sidebar: Ollama model picker, TTS engine (Edge / Kokoro / XTTS / MMS Italian), voice/lang, rate, XTTS speaker WAV, book language (LL)
 - Prev / Next + jump-to-section; **Stop** TTS
 - **Audiobook export** — section range → background job → download link
 - Two-column desktop layout: reading/LL left, chat (+ LL cards) right
@@ -104,6 +121,7 @@ python -m streamlit run reading_companion.py
 3. **LL mode** — Prepare / summary / vocab ▶ / Read aloud with rate change; Stop clears playback.
 4. **Audiobook** — pick start/end indices, Generate, wait for download link (Edge/Kokoro first; XTTS needs speaker WAV).
 5. **XTTS** — upload speaker WAV, select XTTS + language, Read aloud / audiobook.
+6. **MMS Italian** — select engine “MMS Italian” (no speaker upload). First synthesis downloads `facebook/mms-tts-ita`. Rate uses simple resampling (pitch shifts). Word ▶ uses MMS when this engine is selected.
 
 ## API sketch
 

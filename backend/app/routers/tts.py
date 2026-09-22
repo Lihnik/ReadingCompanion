@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from companion.constants import EDGE_LANG_VOICES, EDGE_VOICES, KOKORO_VOICES, XTTS_LANGUAGES
+from companion.constants import EDGE_LANG_VOICES, EDGE_VOICES, KOKORO_VOICES, MMS_ITALIAN_VOICES, XTTS_LANGUAGES
 from companion.tts import (
     _engine_key,
     _generate_one,
@@ -30,7 +30,7 @@ router = APIRouter()
 class SectionStartRequest(BaseModel):
     book_id: str
     section_idx: int
-    engine: str = "Edge TTS"  # Edge TTS | Kokoro | XTTS
+    engine: str = "Edge TTS"  # Edge TTS | Kokoro | XTTS | MMS Italian
     voice: str = "Aria (US, Female)"
     rate: float = 1.0
     speaker_key: Optional[str] = None
@@ -59,6 +59,7 @@ class WordRequest(BaseModel):
     rate: float = 1.0
     speaker_key: Optional[str] = None
     xtts_lang: Optional[str] = None
+    engine: Optional[str] = None  # when MMS Italian, word ▶ uses MMS too
 
 
 class AudiobookStartRequest(BaseModel):
@@ -78,6 +79,8 @@ def _resolve_voice_id(engine: str, voice_label: str) -> tuple[str, str]:
         return ek, EDGE_VOICES.get(voice_label, voice_label)
     if ek == "kokoro":
         return ek, KOKORO_VOICES.get(voice_label, voice_label)
+    if ek == "mms_italian":
+        return ek, MMS_ITALIAN_VOICES.get(voice_label, voice_label or "ita")
     if voice_label in XTTS_LANGUAGES:
         return ek, XTTS_LANGUAGES[voice_label]
     if voice_label in XTTS_LANGUAGES.values():
@@ -283,7 +286,8 @@ def pronounce_word(body: WordRequest):
     if not word:
         raise HTTPException(400, "Empty word")
 
-    cache_key = (word.lower(), body.language)
+    eng_tag = (body.engine or "").strip() or "default"
+    cache_key = (word.lower(), body.language, eng_tag, round(body.rate, 3))
     if cache_key in store.word_cache:
         audio, mime = store.word_cache[cache_key]
         return Response(content=audio, media_type=mime)
@@ -302,6 +306,7 @@ def pronounce_word(body: WordRequest):
         body.rate,
         xtts_voice=xtts_lang,
         speaker_wav_bytes=speaker,
+        preferred_engine=body.engine,
     )
     if not result:
         edge = edge_voice_for_language(body.language)
@@ -461,5 +466,6 @@ def list_voices():
         "edge": EDGE_VOICES,
         "kokoro": KOKORO_VOICES,
         "xtts_languages": XTTS_LANGUAGES,
+        "mms_italian": MMS_ITALIAN_VOICES,
         "edge_lang_voices": dict(EDGE_LANG_VOICES),
     }

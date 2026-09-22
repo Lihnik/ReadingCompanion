@@ -118,16 +118,38 @@ def generate_vocab_word_audio(
     tts_rate: float,
     xtts_voice: str | None = None,
     speaker_wav_bytes: bytes | None = None,
+    preferred_engine: str | None = None,
 ) -> tuple[bytes, str] | None:
     """Generate one vocab word clip and cache it. Does NOT touch progressive player state.
 
     Pass speaker_wav_bytes explicitly for non-Streamlit callers (FastAPI).
+    If preferred_engine is MMS Italian (label or key), use MMS for consistency with section TTS.
     """
     word = (word or "").strip()
     if not word:
         return None
     vocab_cache = _vocab_audio_cache_dict()
     audio_cache = _audio_cache_dict()
+
+    pref = (preferred_engine or "").strip()
+    pref_key = _engine_key(pref) if pref in ("Edge TTS", "Kokoro", "XTTS", "MMS Italian") else pref
+    if pref_key == "mms_italian" or pref == "mms_italian":
+        vkey = _vocab_cache_key(word, book_language, "mms_italian:ita")
+        hit = vocab_cache.get(vkey)
+        if hit:
+            return hit
+        cache_key = _make_tts_cache_key(word, "ita", tts_rate, "mms_italian")
+        try:
+            if cache_key in audio_cache:
+                audio_bytes, fmt = audio_cache[cache_key]
+            else:
+                audio_bytes = _speak_mms_italian(word, tts_rate)
+                fmt = "audio/wav"
+                _cache_put(cache_key, audio_bytes, fmt)
+            vocab_cache[vkey] = (audio_bytes, fmt)
+            return audio_bytes, fmt
+        except Exception:
+            return None
 
     edge_voice = edge_voice_for_language(book_language)
     if edge_voice:
@@ -360,6 +382,80 @@ def _speak_kokoro(text: str, voice: str, speed: float) -> bytes:
     return buf.read()
 
 
+
+def _approx_speed_change(audio, rate: float):
+    """Approximate playback speed via linear resample (also shifts pitch).
+
+    MMS-TTS has no native speed control. rate>1 → faster (fewer samples at same SR).
+    """
+    import numpy as np
+
+    if audio is None or len(audio) == 0:
+        return audio
+    if rate is None or abs(float(rate) - 1.0) < 1e-3 or float(rate) <= 0:
+        return audio
+    rate = float(rate)
+    n = int(audio.shape[0])
+    new_n = max(1, int(round(n / rate)))
+    if new_n == n:
+        return audio
+    x_old = np.linspace(0.0, 1.0, n, endpoint=False)
+    x_new = np.linspace(0.0, 1.0, new_n, endpoint=False)
+    return np.interp(x_new, x_old, audio.astype(np.float64)).astype(np.float32)
+
+
+def _load_mms_italian():
+    """Load facebook/mms-tts-ita (VitsModel + tokenizer); cache at module level."""
+    try:
+        import torch
+        from transformers import AutoTokenizer, VitsModel
+    except ImportError as e:
+        raise RuntimeError(
+            f"MMS Italian dependencies not installed: {e}. "
+            "Run: pip install transformers torch torchaudio soundfile"
+        ) from e
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    cache_key = f"_mms_ita_{device}"
+    if not _model_cache_has(cache_key):
+        model = VitsModel.from_pretrained("facebook/mms-tts-ita")
+        model = model.to(device)
+        model.eval()
+        tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ita")
+        _model_cache_set(cache_key, (model, tokenizer, device))
+    return _model_cache_get(cache_key)
+
+
+def _speak_mms_italian(text: str, rate: float = 1.0) -> bytes:
+    """Synthesize Italian text with facebook/mms-tts-ita; return WAV bytes.
+
+    Rate is approximated by simple resampling when != 1.0 (no native speed).
+    """
+    import numpy as np
+    import soundfile as sf
+    import torch
+
+    model, tokenizer, device = _load_mms_italian()
+    text = _preprocess_tts_text(text or "")
+    if not text:
+        return b""
+
+    inputs = tokenizer(text, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        waveform = model(**inputs).waveform
+    audio = waveform.squeeze().detach().cpu().float().numpy()
+    if audio.ndim > 1:
+        audio = audio.reshape(-1)
+    audio = _approx_speed_change(audio, rate)
+    sr = int(getattr(model.config, "sampling_rate", 16000) or 16000)
+    buf = io.BytesIO()
+    sf.write(buf, audio, sr, format="WAV")
+    buf.seek(0)
+    return buf.read()
+
+
+
 def convert_audio_to_wav(audio_bytes: bytes) -> bytes:
     """Convert browser-recorded audio (WebM/OGG/etc.) to WAV bytes."""
     import io
@@ -422,10 +518,10 @@ def split_for_xtts(t: str, max_chars: int = 200) -> list:
 
 
 def split_for_tts(text: str, engine: str) -> list:
-    """Split processed text into progressive segments. XTTS uses ~200-char chunks;
+    """Split processed text into progressive segments. XTTS/MMS use ~200-char chunks;
     Edge/Kokoro use longer sentence groups (~500 chars) for fewer players."""
     processed = text if not text else text
-    if engine == "xtts":
+    if engine in ("xtts", "mms_italian"):
         return split_for_xtts(processed, max_chars=200)
     # Group sentences into ~500-char segments for progressive Edge/Kokoro
     max_chars = 500
@@ -569,6 +665,8 @@ def _engine_key(tts_engine: str) -> str:
         return "kokoro"
     if tts_engine == "XTTS":
         return "xtts"
+    if tts_engine == "MMS Italian":
+        return "mms_italian"
     return "edge"
 
 
@@ -620,6 +718,9 @@ def _generate_one(
             raise RuntimeError("Upload a speaker WAV file to use XTTS.")
         # Single segment — do not re-split
         audio_bytes = _speak_xtts_chunks([processed], voice, spk, rate)
+        fmt = "audio/wav"
+    elif engine == "mms_italian":
+        audio_bytes = _speak_mms_italian(processed, rate)
         fmt = "audio/wav"
     else:
         audio_bytes = _speak_edge(processed, voice, rate)
@@ -1297,7 +1398,7 @@ def resolve_english_voice(tts_engine: str, tts_voice: str) -> tuple[str, str, st
         return "Kokoro", tts_voice, "kokoro"
     if tts_engine == "Edge TTS":
         return "Edge TTS", tts_voice, "edge"
-    # XTTS (or unknown): prefer local Kokoro English voice
+    # XTTS / MMS Italian (or unknown): prefer local Kokoro English voice
     return "Kokoro", DEFAULT_EN_KOKORO_VOICE, "kokoro"
 
 
@@ -1397,6 +1498,9 @@ def speak_text(
                     st.error("Upload a speaker WAV file in the sidebar to use XTTS.")
                     return
                 audio_bytes = _speak_xtts(processed, voice, st.session_state.xtts_speaker_wav, rate)
+                fmt = "audio/wav"
+            elif engine == "mms_italian":
+                audio_bytes = _speak_mms_italian(processed, rate)
                 fmt = "audio/wav"
             else:
                 audio_bytes = _speak_edge(processed, voice, rate)
@@ -1534,6 +1638,9 @@ def _get_or_generate_audio(text: str, voice: str, rate: float, engine: str) -> b
     elif engine == "xtts":
         audio_bytes = _speak_xtts(processed, voice, st.session_state.xtts_speaker_wav, rate)
         fmt = "audio/wav"
+    elif engine == "mms_italian":
+        audio_bytes = _speak_mms_italian(processed, rate)
+        fmt = "audio/wav"
     else:
         audio_bytes = _speak_edge(processed, voice, rate)
         fmt = "audio/mp3"
@@ -1556,8 +1663,12 @@ def speak_bilingual_vocab(
     st.session_state.tts_error = ""
     clear_progressive_tts()
 
-    book_ek = _engine_key(book_engine) if book_engine in ("Edge TTS", "Kokoro", "XTTS") else book_engine
-    if book_ek not in ("edge", "kokoro", "xtts"):
+    book_ek = (
+        _engine_key(book_engine)
+        if book_engine in ("Edge TTS", "Kokoro", "XTTS", "MMS Italian")
+        else book_engine
+    )
+    if book_ek not in ("edge", "kokoro", "xtts", "mms_italian"):
         book_ek = "xtts"
 
     # Build playlist: each entry → (word, book) then (translation, edge)
