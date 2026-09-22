@@ -16,6 +16,7 @@ import { AudiobookPanel } from './AudiobookPanel';
 import { ChatPanel } from './ChatPanel';
 import { ProgressivePlayer } from './ProgressivePlayer';
 import { ReadingPanel } from './ReadingPanel';
+import { AmbientBackground } from './AmbientBackground';
 import './index.css';
 
 const LANGS = [
@@ -275,11 +276,15 @@ export default function App() {
     return Object.keys(voices.xtts_languages);
   }, [engine, voices]);
 
+  const hasBook = Boolean(bookId);
+
   return (
-    <div className="app">
+    <>
+      <AmbientBackground />
+      <div className="app">
       <aside className="sidebar">
-        <h1 style={{ fontSize: '1.1rem', marginTop: 0 }}>Reading Companion</h1>
-        <div className="muted" style={{ marginBottom: '0.75rem' }}>
+        <h1 className="brand-title">Reading Companion</h1>
+        <div className="muted brand-sub">
           React + FastAPI
         </div>
 
@@ -429,7 +434,7 @@ export default function App() {
 
       <main className="main">
         <div className="header">
-          <h1>{sectionTitle || 'No section selected'}</h1>
+          <h1>{hasBook ? (sectionTitle || 'Loading…') : 'Welcome'}</h1>
           {bookId && (
             <span className="badge">
               {sectionPos + 1}/{sections.length} · idx {sectionIdx}
@@ -443,9 +448,23 @@ export default function App() {
             {error}
           </div>
         )}
-        <div className="section-text">{sectionText || 'Upload a book to begin.'}</div>
+        {hasBook ? (
+          <div className="section-text">{sectionText || 'Loading section…'}</div>
+        ) : (
+          <div className="landing">
+            <h2 className="landing-title">
+              Where <em>dreams</em> rise <em>through the silence.</em>
+            </h2>
+            <p className="landing-sub">
+              A companion for deep readers and patient thinkers. Upload a PDF or
+              EPUB to hear it narrated, ask questions, and learn vocabulary —
+              all with a quiet cinematic workspace.
+            </p>
+            <p className="landing-hint">Upload a book in the sidebar to begin</p>
+          </div>
+        )}
 
-        {appMode === 'language_learning' ? (
+        {hasBook && appMode === 'language_learning' ? (
           <div className="player-bar">
             <div className="btn-row">
               <button type="button" className="btn primary" disabled={!bookId || !!busy} onClick={runReadAloud}>
@@ -463,7 +482,7 @@ export default function App() {
             </div>
             <ProgressivePlayer jobId={jobId} onStopped={() => setJobId(null)} />
           </div>
-        ) : (
+        ) : hasBook ? (
           <div className="player-bar reading-bar">
             <ReadingPanel
               bookId={bookId}
@@ -477,7 +496,7 @@ export default function App() {
             />
             <ProgressivePlayer jobId={jobId} onStopped={() => setJobId(null)} />
           </div>
-        )}
+        ) : null}
       </main>
 
       <aside className="rail">
@@ -537,5 +556,6 @@ export default function App() {
         />
       </aside>
     </div>
+    </>
   );
 }
