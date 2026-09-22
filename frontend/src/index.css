@@ -1,0 +1,212 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel2: #1e2330;
+  --border: #2a3142;
+  --text: #e8ecf4;
+  --muted: #9aa3b5;
+  --accent: #6ea8fe;
+  --accent2: #f0c674;
+  --danger: #f07178;
+  --ok: #7fd99a;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  line-height: 1.45;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); }
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 280px 1fr 340px;
+  gap: 0;
+  height: 100%;
+  min-height: 100vh;
+}
+
+.sidebar, .rail {
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: 1rem;
+  overflow: auto;
+}
+.rail {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #12151c;
+}
+
+.header {
+  padding: 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  background: var(--panel);
+}
+.header h1 {
+  font-size: 1.05rem;
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.badge {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: #243049;
+  color: var(--accent);
+}
+
+.section-text {
+  flex: 1;
+  overflow: auto;
+  padding: 1.25rem 1.5rem 6rem;
+  white-space: pre-wrap;
+  font-size: 1.05rem;
+  line-height: 1.7;
+  max-width: 52rem;
+}
+
+.player-bar {
+  position: sticky;
+  bottom: 0;
+  border-top: 1px solid var(--border);
+  background: rgba(23, 26, 33, 0.95);
+  backdrop-filter: blur(8px);
+  padding: 0.75rem 1.25rem;
+}
+
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+label.field > * { color: var(--text); }
+
+input[type="file"], select, input[type="text"], input[type="number"] {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+}
+
+.btn {
+  background: #2a3550;
+  border: 1px solid #3a4a6a;
+  border-radius: 8px;
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+}
+.btn:hover { background: #334266; }
+.btn.primary {
+  background: #3b6fd9;
+  border-color: #5b8df0;
+}
+.btn.primary:hover { background: #4a7ee8; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.5rem 0 0.85rem;
+}
+
+.section-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+}
+.section-list li button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+  cursor: pointer;
+  color: var(--text);
+}
+.section-list li button:hover { background: var(--panel2); }
+.section-list li button.active {
+  background: #243049;
+  border-color: #3a4a6a;
+}
+
+.muted { color: var(--muted); font-size: 0.82rem; }
+.error { color: var(--danger); font-size: 0.85rem; margin: 0.4rem 0; }
+.ok { color: var(--ok); }
+
+.card {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+.card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  color: var(--accent2);
+}
+
+.vocab-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.vocab-table th, .vocab-table td {
+  text-align: left;
+  padding: 0.35rem 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.vocab-table th { color: var(--muted); font-weight: 500; }
+.play-word {
+  width: 2rem;
+  height: 1.8rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 220, 130, 0.35);
+  background: rgba(255, 220, 130, 0.12);
+  color: var(--accent2);
+  cursor: pointer;
+}
+
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.scrubber { flex: 1; }
+.time { font-variant-numeric: tabular-nums; font-size: 0.85rem; color: var(--muted); min-width: 5.5rem; }
+
+.stub {
+  opacity: 0.65;
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
+@media (max-width: 960px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+  }
+  .sidebar, .rail { border: none; border-bottom: 1px solid var(--border); max-height: 40vh; }
+}

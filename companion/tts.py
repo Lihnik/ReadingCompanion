@@ -26,26 +26,71 @@ _VOCAB_PREFETCH_LOCK = threading.Lock()
 _VOCAB_PREFETCH_RESULTS: dict = {}
 _VOCAB_PREFETCH_PENDING: set = set()
 
+# Module-level caches so FastAPI (non-Streamlit) can reuse models / audio without session_state.
+_MODEL_CACHE: dict = {}
+_AUDIO_CACHE: dict = {}
+_VOCAB_AUDIO_CACHE: dict = {}
+
+
+def _has_streamlit_ctx() -> bool:
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
+def _model_cache_has(key: str) -> bool:
+    if _has_streamlit_ctx():
+        return key in st.session_state
+    return key in _MODEL_CACHE
+
+
+def _model_cache_get(key: str, default=None):
+    if _has_streamlit_ctx():
+        return st.session_state.get(key, default)
+    return _MODEL_CACHE.get(key, default)
+
+
+def _model_cache_set(key: str, value) -> None:
+    if _has_streamlit_ctx():
+        st.session_state[key] = value
+    else:
+        _MODEL_CACHE[key] = value
+
+
+def _audio_cache_dict() -> dict:
+    if _has_streamlit_ctx():
+        if "tts_cache" not in st.session_state:
+            st.session_state.tts_cache = {}
+        return st.session_state.tts_cache
+    return _AUDIO_CACHE
+
+
+def _vocab_audio_cache_dict() -> dict:
+    if _has_streamlit_ctx():
+        if "vocab_audio_cache" not in st.session_state:
+            st.session_state.vocab_audio_cache = {}
+        return st.session_state.vocab_audio_cache
+    return _VOCAB_AUDIO_CACHE
+
 
 def _vocab_cache_key(word: str, book_language: str, voice: str) -> tuple:
     return ((word or "").strip(), book_language or "", voice or "")
 
 
 def drain_vocab_prefetch_into_session() -> None:
-    """Merge background-prefetch results into session_state.vocab_audio_cache."""
-    if "vocab_audio_cache" not in st.session_state:
-        st.session_state.vocab_audio_cache = {}
+    """Merge background-prefetch results into vocab/audio caches."""
     with _VOCAB_PREFETCH_LOCK:
         items = list(_VOCAB_PREFETCH_RESULTS.items())
-    cache = st.session_state.vocab_audio_cache
-    tts_cache = st.session_state.get("tts_cache")
+    cache = _vocab_audio_cache_dict()
+    tts_cache = _audio_cache_dict()
     for key, (audio_bytes, fmt) in items:
         cache[key] = (audio_bytes, fmt)
-        if tts_cache is not None:
-            word, _lang, voice = key
-            ck = _make_tts_cache_key(word, voice, 1.0, "edge")
-            if ck not in tts_cache:
-                tts_cache[ck] = (audio_bytes, fmt)
+        word, _lang, voice = key
+        ck = _make_tts_cache_key(word, voice, 1.0, "edge")
+        if ck not in tts_cache:
+            tts_cache[ck] = (audio_bytes, fmt)
 
 
 def get_vocab_audio_cached(word: str, book_language: str, tts_rate: float = 1.0):
@@ -58,12 +103,12 @@ def get_vocab_audio_cached(word: str, book_language: str, tts_rate: float = 1.0)
     if not edge_voice:
         return None
     key = _vocab_cache_key(word, book_language, edge_voice)
-    hit = st.session_state.get("vocab_audio_cache", {}).get(key)
+    hit = _vocab_audio_cache_dict().get(key)
     if hit:
         return hit
     ck = _make_tts_cache_key(word, edge_voice, tts_rate, "edge")
-    if ck in st.session_state.get("tts_cache", {}):
-        return st.session_state.tts_cache[ck]
+    if ck in _audio_cache_dict():
+        return _audio_cache_dict()[ck]
     return None
 
 
@@ -72,56 +117,63 @@ def generate_vocab_word_audio(
     book_language: str,
     tts_rate: float,
     xtts_voice: str | None = None,
+    speaker_wav_bytes: bytes | None = None,
 ) -> tuple[bytes, str] | None:
-    """Generate one vocab word clip and cache it. Does NOT touch progressive player state."""
+    """Generate one vocab word clip and cache it. Does NOT touch progressive player state.
+
+    Pass speaker_wav_bytes explicitly for non-Streamlit callers (FastAPI).
+    """
     word = (word or "").strip()
     if not word:
         return None
-    if "vocab_audio_cache" not in st.session_state:
-        st.session_state.vocab_audio_cache = {}
+    vocab_cache = _vocab_audio_cache_dict()
+    audio_cache = _audio_cache_dict()
 
     edge_voice = edge_voice_for_language(book_language)
     if edge_voice:
         key = _vocab_cache_key(word, book_language, edge_voice)
-        hit = st.session_state.vocab_audio_cache.get(key)
+        hit = vocab_cache.get(key)
         if hit:
             return hit
         try:
             cache_key = _make_tts_cache_key(word, edge_voice, tts_rate, "edge")
-            if cache_key in st.session_state.tts_cache:
-                audio_bytes, fmt = st.session_state.tts_cache[cache_key]
+            if cache_key in audio_cache:
+                audio_bytes, fmt = audio_cache[cache_key]
             else:
                 audio_bytes = _speak_edge(word, edge_voice, tts_rate)
                 fmt = "audio/mp3"
                 _cache_put(cache_key, audio_bytes, fmt)
-            st.session_state.vocab_audio_cache[key] = (audio_bytes, fmt)
+            vocab_cache[key] = (audio_bytes, fmt)
             return audio_bytes, fmt
         except Exception:
             pass
 
     lang = (xtts_voice or "").strip() or XTTS_LANGUAGES.get(book_language) or "en"
-    if not st.session_state.get("xtts_speaker_wav"):
+    spk = speaker_wav_bytes
+    if spk is None and _has_streamlit_ctx():
+        spk = st.session_state.get("xtts_speaker_wav") or b""
+    if not spk:
         return None
     prompt = word.rstrip(".!?…") + "."
     vkey = _vocab_cache_key(word, book_language, f"xtts:{lang}")
-    hit = st.session_state.vocab_audio_cache.get(vkey)
+    hit = vocab_cache.get(vkey)
     if hit:
         return hit
-    cache_key = _make_tts_cache_key(f"vocab:{prompt}", lang, tts_rate, "xtts")
+    cache_key = _make_tts_cache_key(f"vocab:{prompt}", lang, tts_rate, "xtts", speaker_wav_bytes=spk)
     try:
-        if cache_key in st.session_state.tts_cache:
-            audio_bytes, fmt = st.session_state.tts_cache[cache_key]
+        if cache_key in audio_cache:
+            audio_bytes, fmt = audio_cache[cache_key]
         else:
             audio_bytes = _speak_xtts_chunks(
                 [prompt],
                 lang,
-                st.session_state.xtts_speaker_wav,
+                spk,
                 tts_rate,
                 word_mode=True,
             )
             fmt = "audio/wav"
             _cache_put(cache_key, audio_bytes, fmt)
-        st.session_state.vocab_audio_cache[vkey] = (audio_bytes, fmt)
+        vocab_cache[vkey] = (audio_bytes, fmt)
         return audio_bytes, fmt
     except Exception:
         return None
@@ -174,7 +226,7 @@ def prefetch_vocab_audio(entries: list, book_language: str, tts_rate: float = 1.
     pending = []
     for w in uniq:
         key = _vocab_cache_key(w, book_language, edge_voice)
-        if key in st.session_state.get("vocab_audio_cache", {}):
+        if key in _vocab_audio_cache_dict():
             continue
         with _VOCAB_PREFETCH_LOCK:
             if key in _VOCAB_PREFETCH_RESULTS or key in _VOCAB_PREFETCH_PENDING:
@@ -288,11 +340,11 @@ def _speak_kokoro(text: str, voice: str, speed: float) -> bytes:
     # American English voices start with 'a', British with 'b'
     lang_code = "b" if voice.startswith("b") else "a"
     cache_key = f"_kokoro_pipeline_{lang_code}_{device}"
-    if cache_key not in st.session_state:
+    if not _model_cache_has(cache_key):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            st.session_state[cache_key] = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M", device=device)
-    pipeline = st.session_state[cache_key]
+            _model_cache_set(cache_key, KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M", device=device))
+    pipeline = _model_cache_get(cache_key)
 
     chunks = [
         audio.detach().cpu().numpy()
@@ -416,7 +468,7 @@ def _load_xtts_model():
     torchaudio.load = _sf_load
 
     model_cache_key = "_xtts_model"
-    if model_cache_key not in st.session_state:
+    if not _model_cache_has(model_cache_key):
         model_dir = snapshot_download("tartuNLP/XTTS-v2-multi")
         config = XttsConfig()
         config.load_json(f"{model_dir}/config.json")
@@ -424,9 +476,9 @@ def _load_xtts_model():
         model.load_checkpoint(config, checkpoint_dir=model_dir, eval=True)
         if torch.cuda.is_available():
             model.cuda()
-        st.session_state[model_cache_key] = model
+        _model_cache_set(model_cache_key, model)
 
-    model = st.session_state[model_cache_key]
+    model = _model_cache_get(model_cache_key)
 
     _orig_preprocess = model.tokenizer.preprocess_text
     def _patched_preprocess(txt, lang):
@@ -444,15 +496,15 @@ def _get_xtts_conditioning(model, speaker_wav_bytes: bytes):
     import os
     spk_hash = hashlib.md5(speaker_wav_bytes).hexdigest()
     cache_key = f"_xtts_cond_{spk_hash}"
-    if cache_key in st.session_state:
-        return st.session_state[cache_key]
+    if _model_cache_has(cache_key):
+        return _model_cache_get(cache_key)
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     try:
         tmp.write(speaker_wav_bytes)
         tmp.flush()
         tmp.close()
         latents = model.get_conditioning_latents(audio_path=[tmp.name])
-        st.session_state[cache_key] = latents
+        _model_cache_set(cache_key, latents)
         return latents
     finally:
         os.unlink(tmp.name)
@@ -520,36 +572,54 @@ def _engine_key(tts_engine: str) -> str:
     return "edge"
 
 
-def _make_tts_cache_key(processed: str, voice: str, rate: float, engine: str) -> str:
+def _make_tts_cache_key(
+    processed: str,
+    voice: str,
+    rate: float,
+    engine: str,
+    speaker_wav_bytes: bytes | None = None,
+) -> str:
     if engine == "xtts":
-        spk = st.session_state.get("xtts_speaker_wav") or b""
-        spk_hash = hashlib.md5(spk).hexdigest()
+        if speaker_wav_bytes is None:
+            if _has_streamlit_ctx():
+                speaker_wav_bytes = st.session_state.get("xtts_speaker_wav") or b""
+            else:
+                speaker_wav_bytes = b""
+        spk_hash = hashlib.md5(speaker_wav_bytes or b"").hexdigest()
         return hashlib.md5(f"{processed}|xtts|{voice}|{spk_hash}".encode()).hexdigest()
     return hashlib.md5(f"{processed}|{voice}|{rate}|{engine}".encode()).hexdigest()
 
 
 def _cache_put(cache_key: str, audio_bytes: bytes, fmt: str):
-    cache = st.session_state.tts_cache
+    cache = _audio_cache_dict()
     cache[cache_key] = (audio_bytes, fmt)
     while len(cache) > TTS_CACHE_MAX_ENTRIES:
         cache.pop(next(iter(cache)))
 
 
-def _generate_one(processed: str, voice: str, rate: float, engine: str) -> tuple[bytes, str]:
+def _generate_one(
+    processed: str,
+    voice: str,
+    rate: float,
+    engine: str,
+    speaker_wav_bytes: bytes | None = None,
+) -> tuple[bytes, str]:
     """Generate audio for a single (already-split) text segment. Returns (bytes, mime)."""
-    cache_key = _make_tts_cache_key(processed, voice, rate, engine)
-    if cache_key in st.session_state.tts_cache:
-        return st.session_state.tts_cache[cache_key]
+    cache = _audio_cache_dict()
+    cache_key = _make_tts_cache_key(processed, voice, rate, engine, speaker_wav_bytes=speaker_wav_bytes)
+    if cache_key in cache:
+        return cache[cache_key]
     if engine == "kokoro":
         audio_bytes = _speak_kokoro(processed, voice, rate)
         fmt = "audio/wav"
     elif engine == "xtts":
-        if not st.session_state.xtts_speaker_wav:
-            raise RuntimeError("Upload a speaker WAV file in the sidebar to use XTTS.")
+        spk = speaker_wav_bytes
+        if spk is None and _has_streamlit_ctx():
+            spk = st.session_state.get("xtts_speaker_wav") or b""
+        if not spk:
+            raise RuntimeError("Upload a speaker WAV file to use XTTS.")
         # Single segment — do not re-split
-        audio_bytes = _speak_xtts_chunks(
-            [processed], voice, st.session_state.xtts_speaker_wav, rate
-        )
+        audio_bytes = _speak_xtts_chunks([processed], voice, spk, rate)
         fmt = "audio/wav"
     else:
         audio_bytes = _speak_edge(processed, voice, rate)

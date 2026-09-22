@@ -17,6 +17,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
 xtts = [
     "coqui-tts[codec]",
     "huggingface_hub",

@@ -1,0 +1,5 @@
+# FastAPI stack for the React rewrite (install into the same venv as requirements.txt)
+-r requirements.txt
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
