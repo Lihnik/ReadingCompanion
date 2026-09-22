@@ -4,22 +4,33 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Overview
 
-AI-powered reading companion — upload a PDF and read it section by section with AI commentary,
-comprehension questions, text-to-speech, and a chat interface powered by a local Ollama model.
+AI-powered reading companion — upload a PDF or EPUB and read it section by section with
+on-demand AI commentary, comprehension questions, text-to-speech, and a chat interface
+powered by a local Ollama model.
 
 ## Environment
 
-- Python 3.12 via `.venv\` (kokoro>=0.9.4 requires Python >=3.10,<3.13)
-- Activate: `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (bash)
+- Python 3.12 via `.venv` (kokoro>=0.9.4 requires Python >=3.10,<3.13)
+- Activate: `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (POSIX)
 
 ## Setup (first time)
 
 ```bash
-py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4" beautifulsoup4 pydub
+# POSIX
+python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+# Windows
+py -3.12 -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 ```
 
-Kokoro also requires espeak-ng for phoneme generation on Windows — download the installer from
-https://github.com/espeak-ng/espeak-ng/releases (espeak-ng-X.X-x64.msi).
+Core deps are also listed in `pyproject.toml`. Optional XTTS extras: `pip install ".[xtts]"`.
+
+Kokoro also requires espeak-ng for phoneme generation:
+- Windows — download the installer from https://github.com/espeak-ng/espeak-ng/releases (`espeak-ng-X.X-x64.msi`)
+- macOS — `brew install espeak-ng`
+- Linux — `sudo apt install espeak-ng` (or equivalent)
+
+`pydub` (mic → WAV for XTTS) also needs `ffmpeg` on `PATH`.
 
 ## Running
 
@@ -28,23 +39,61 @@ https://github.com/espeak-ng/espeak-ng/releases (espeak-ng-X.X-x64.msi).
 ollama serve
 
 # Then in a separate terminal:
-.venv\Scripts\python -m streamlit run reading_companion.py
-```
-
-Or with venv activated:
-```bash
 python -m streamlit run reading_companion.py
+# Windows without activating the venv:
+# .venv\Scripts\python -m streamlit run reading_companion.py
 ```
 
 Default Streamlit port is 8501. The app opens automatically in the browser.
 
 ## Key patterns
 
-- **Single-file app**: all logic lives in `reading_companion.py` — no modules or packages
-- **Session state**: all runtime state is in `st.session_state` (defined in `DEFAULTS` dict at top)
-- **TTS engines**: Edge TTS (internet, MP3), Kokoro-82M (local English WAV), XTTS (local multilingual WAV, voice cloning) — selected in sidebar
-- **TTS cache**: generated audio is cached in session state; cache key = MD5(text|voice|rate|engine) for edge/kokoro, MD5(text|language|speaker_wav_hash|engine) for XTTS
-- **XTTS**: uses `tartuNLP/XTTS-v2-multi` (~5.8 GB via `huggingface_hub.snapshot_download`); requires user-uploaded speaker WAV; needs `coqui-tts[codec]`, `torchaudio`, `transformers>=4.33,<5.0`
-- **PDF parsing**: PyMuPDF with multi-column detection; one section per page (split if >3000 chars)
-- **EPUB parsing**: stdlib zipfile + xml.etree + beautifulsoup4; spine order preserved, chapter titles from headings
-- **AI model**: any Ollama model; default `llama3.1:8b` — pull with `ollama pull <model>`
+- **Modular package**: entry point is `reading_companion.py`; logic lives under `companion/`
+  (`constants`, `navigation`, `ollama`, `parsing`, `tts`, `ui`, `hero`)
+- **Session state**: all runtime state is in `st.session_state`. Defaults come from
+  `fresh_defaults()` in `companion/constants.py` (deep-copied so mutables like
+  `chat_history` / `tts_cache` are never shared with the module-level `DEFAULTS`)
+- **On-demand AI**: section text renders first; commentary and comprehension questions
+  are generated via “Generate insight” / “Get a question” and cached in
+  `commentary_cache` / `question_cache` keyed by `pdf_name|chunk_idx|model`
+- **Language Learning mode**: sidebar Mode radio; on-demand “English summary” /
+  “Vocabulary” (plus optional “Prepare this section” via ThreadPoolExecutor);
+  caches in `ll_summary_cache` / `ll_vocab_cache` keyed by
+  `pdf_name|chunk_idx|language|model`. Non-English books prefer XTTS; XTTS
+  language stays synced with `ll_book_language`. Vocab prompt asks for JSON
+  `[{word,translation}]`; `parse_vocab_response` also accepts WORD:/TRANSLATION:
+  blocks, bullets, inline separators, and markdown tables. **Never cache an empty
+  parse** — show warning + raw preview + Retry. English summary TTS uses Kokoro
+  (`af_heart`) when sidebar is XTTS (Edge fallback if Kokoro missing); vocab
+  per-word ▶ via `speak_vocab_word` (Edge neural for book language from
+  `EDGE_LANG_VOICES`, else XTTS word-mode with `f"{word}."` + lower temperature);
+  clears progressive playlist / bumps `tts_player_gen` so the HTML player does
+  not restore a long-section buffer. Prefetch Edge clips after vocab extract;
+  per-word ▶ uses inline HTML audio (no shared-player remount). “Read vocabulary” removed.
+- **Progressive TTS**: `speak_text` / `tts_button` split long text (XTTS ~200
+  chars); first segment plays ASAP; remaining segments continue via
+  `@st.fragment(run_every=…)`. Playback mounts one persistent HTML player outside the polling fragment
+  (hidden `<audio>` + custom full-timeline scrubber); new segments are pushed via
+  `localStorage`/`window.parent` with per-segment `dur` and drained in JS without remounting.
+  Scrubber max = sum of loaded durations; seek maps global time → segment index + offset
+  (gapless `ended` queue; no mid-play concat remount). Full concat is built only when the
+  playlist completes. Session keys: `tts_segments`,
+  `tts_segment_audios`, `tts_progressive_*`, `tts_player_gen`. Cache capped at
+  `TTS_CACHE_MAX_ENTRIES`.
+- **Ollama GPU**: model residency/GPU is via Ollama (`ollama ps`), not Streamlit.
+  `call_ollama` uses short `num_predict` defaults (~512) and `keep_alive="10m"`
+- **Ollama models**: sidebar selectbox is driven by `fetch_ollama_models()` (`/api/tags`);
+  preferred names in `PREFERRED_OLLAMA_MODELS` are a soft sort order / offline fallback
+- **TTS engines**: Edge TTS (internet, MP3), Kokoro-82M (local English WAV), XTTS (local
+  multilingual WAV, voice cloning) — selected in sidebar
+- **TTS cache**: generated audio is cached in session state; cache key =
+  MD5(text|voice|rate|engine) for edge/kokoro, MD5(text|language|speaker_wav_hash|engine) for XTTS
+- **XTTS**: uses `tartuNLP/XTTS-v2-multi` (~5.8 GB via `huggingface_hub.snapshot_download`);
+  requires user-uploaded speaker WAV; imports `TTS` from the **`coqui-tts`** package;
+  needs `coqui-tts[codec]`, `torchaudio`, `transformers>=4.33,<5.0`
+- **PDF parsing**: PyMuPDF with multi-column detection; one section per page
+  (split if >`MAX_CHUNK_CHARS`, currently 5000)
+- **EPUB parsing**: stdlib zipfile + xml.etree + beautifulsoup4; spine order preserved,
+  chapter titles from headings
+- **AI model**: any Ollama model installed locally; default preference `llama3.1:8b` —
+  pull with `ollama pull <model>`

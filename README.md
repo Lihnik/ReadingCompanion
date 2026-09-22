@@ -1,47 +1,103 @@
 # Reading Companion
 
-An AI-powered reading companion that lets you upload a PDF and read it section by section — with AI commentary, comprehension questions, text-to-speech, and a chat interface, all powered by a local Ollama model.
+An AI-powered reading companion that lets you upload a PDF or EPUB and read it section by section — with on-demand AI commentary, comprehension questions, text-to-speech, and a chat interface, all powered by a local Ollama model.
 
 ## Features
 
-- **Section-by-section reading** — PDF or EPUB uploaded, split into sections (~3000 characters max); navigate with Prev/Next or jump directly to any section
-- **AI commentary** — automatic 2-3 sentence insight per section (not a summary — adds perspective)
-- **Comprehension questions** — one question per section with answer submission and AI feedback
+- **Section-by-section reading** — PDF or EPUB uploaded, split into sections (~5000 characters max); navigate with Prev/Next or jump directly to any section
+- **AI commentary** — on-demand 2-3 sentence insight per section (not a summary — adds perspective); cached so revisiting a section does not regenerate
+- **Comprehension questions** — on-demand question per section with answer submission and AI feedback; cached per section
 - **Section summarizer** — on-demand bullet-point summary
 - **Chat** — streaming conversation grounded in the current section; last 6 messages kept as context
-- **Text-to-speech** — three engines:
+- **Text-to-speech** — four engines:
   - **Edge TTS** (internet required) — 6 voices across US/UK/AU English, MP3 output
   - **Kokoro-82M** (fully local) — 9 neural voices, WAV output, ~115 MB model downloaded once; runs on GPU if CUDA is available
   - **XTTS** (fully local, voice cloning) — Estonian, Finnish, and 16 other languages; upload any 6+ second WAV to clone that voice; ~5.8 GB model downloaded once; GPU accelerated
+  - **Piper Italian** (fully local) — dedicated Paola voice (`it_IT-paola-medium` via `piper-tts`); first run downloads ~60 MB. Replaces the non-existent `facebook/mms-tts-ita` (Italian has MMS ASR only, not TTS).
 - **Audiobook generator** — render a selectable range of sections to a single WAV/MP3 file and download it; useful for skipping front/back matter
 - **Multi-column PDF support** — detects two-column layouts and reads left column before right
 - **Reasoning model support** — `<think>` blocks from models like Qwen3 and DeepSeek-R1 are silently stripped; token budgets sized accordingly
+- **Live model list** — sidebar model selectbox is filled from Ollama `/api/tags` (falls back to recommended names if Ollama is down)
+- **Language Learning mode** — for foreign-language books (default book language: Italian): on-demand English summary and vocabulary, optional one-click “Prepare this section” (runs both in parallel), cached per section/language/model; prefers XTTS for non-English TTS
+  - Vocabulary expects a JSON `[{word,translation},…]` response (parser also accepts WORD:/TRANSLATION: blocks, bullets, `word — translation`, and simple markdown tables). Empty parses are **not** cached — you get a warning + Retry with a raw preview.
+  - **English summary** read-aloud uses **Kokoro** (`af_heart` by default) when the sidebar engine is XTTS for the book language — caption: “Summary uses English voice (Kokoro)”. Falls back to Edge if Kokoro is unavailable.
+  - **Vocabulary** — per-word ▶ prefers **Edge neural** for the book language (e.g. Italian `it-IT-ElsaNeural`); falls back to XTTS **word mode** (`"{word}."` only, tighter sampling). Caption: `Pronouncing: …`. Per-word ▶ uses prefetched Edge audio (inline HTML `<audio>`, no Streamlit rerun). The former “Read vocabulary” playlist button was removed.
+- **Progressive TTS** — long section read-aloud (especially XTTS) starts after the first ~200-character chunk; remaining chunks load into a **segment queue**. A persistent HTML player keeps one hidden `<audio>` and a **full-timeline scrubber** whose max = sum of loaded segment durations (grows as `N/M` increases). Seek jumps to any earlier loaded time (segment + offset) without remounting or mid-play concat rebuilds — gapless across chunk boundaries. Caption: `~m:ss loaded (N/M)`.
 
 ## Requirements
 
 - [Ollama](https://ollama.com/) running locally (`ollama serve`)
 - Python 3.12 (kokoro requires `>=3.10,<3.13`)
-- For Kokoro TTS on Windows: [espeak-ng](https://github.com/espeak-ng/espeak-ng/releases) (download `espeak-ng-X.X-x64.msi`)
+- For Kokoro TTS phonemes: [espeak-ng](https://github.com/espeak-ng/espeak-ng)
+  - Windows: download `espeak-ng-X.X-x64.msi` from the releases page
+  - macOS: `brew install espeak-ng`
+  - Linux: `sudo apt install espeak-ng` (or your distro equivalent)
+- For mic → WAV conversion (XTTS record tab): `pydub` plus [ffmpeg](https://ffmpeg.org/) on `PATH`
 
 ## Setup
 
+Preferred: **[uv](https://docs.astral.sh/uv/)** (`pyproject.toml` + `uv.lock`, Python 3.12 pinned via `.python-version`):
+
 ```bash
-py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4" beautifulsoup4
+uv sync
+# Optional Piper Italian: uv sync --extra piper
+# Optional XTTS:          uv sync --extra xtts
+uv run python -m streamlit run reading_companion.py
 ```
+
+<details>
+<summary>pip fallback</summary>
+
+```bash
+# Create a venv (POSIX)
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+# Optional Piper Italian: pip install ".[piper]"  # or: pip install piper-tts onnxruntime
+
+# Create a venv (Windows PowerShell / cmd)
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Or install from `pyproject.toml`:
+
+```bash
+pip install .
+```
+
+`requirements.txt` is exported from `uv.lock` for users without uv.
+
+</details>
 
 **GPU acceleration for Kokoro and XTTS (recommended for NVIDIA GPUs):**
+
 ```bash
-.venv/Scripts/pip install torch torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128
+# POSIX
+pip install torch torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128
+
+# Windows
+.venv\Scripts\pip install torch torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128
 ```
+
 Both engines automatically use the GPU if CUDA is detected; fall back to CPU otherwise.
 
+LLM GPU usage is handled by **Ollama** (not Streamlit). Check loaded models with `ollama ps`.
+
 **XTTS engine (Estonian/multilingual TTS):**
+
+XTTS is imported as `from TTS...` — that module comes from the **`coqui-tts`** package (not a separate `TTS` PyPI name in current installs):
+
 ```bash
-.venv/Scripts/pip install "coqui-tts[codec]" huggingface_hub "transformers>=4.33.0,<5.0"
+pip install "coqui-tts[codec]" huggingface_hub "transformers>=4.33.0,<5.0"
+# or: pip install ".[xtts]"
 ```
+
 The ~5.8 GB model is downloaded on first use and cached permanently.
 
 Pull at least one Ollama model:
+
 ```bash
 ollama pull llama3.1:8b
 ```
@@ -52,7 +108,13 @@ ollama pull llama3.1:8b
 # Terminal 1
 ollama serve
 
-# Terminal 2
+# Terminal 2 (uv)
+uv run python -m streamlit run reading_companion.py
+
+# Terminal 2 (POSIX, activated venv)
+python -m streamlit run reading_companion.py
+
+# Terminal 2 (Windows, without activating the venv)
 .venv\Scripts\python -m streamlit run reading_companion.py
 ```
 
@@ -60,11 +122,11 @@ Opens at `http://localhost:8501`.
 
 ## Supported Models
 
-Select in the sidebar — pull each with `ollama pull <name>` first:
+The sidebar selectbox lists models installed in Ollama (from `/api/tags`). Recommended names (used as soft preference order when present, and as fallback if Ollama is unreachable):
 
 | Model | Notes |
 |---|---|
-| `llama3.1:8b` | Default, well-rounded |
+| `llama3.1:8b` | Default preference, well-rounded |
 | `llama3.2:3b` | Faster, lighter |
 | `mistral:7b` | Good at instruction following |
 | `gemma2:9b` | Strong comprehension |
@@ -72,6 +134,8 @@ Select in the sidebar — pull each with `ollama pull <name>` first:
 | `qwen3.5:9b` | Reasoning model (thinking stripped) |
 | `deepseek-r1:8b` | Reasoning model (thinking stripped) |
 | `phi3:mini` | Very fast, small footprint |
+
+Pull each with `ollama pull <name>` first.
 
 ## TTS Voices
 
@@ -103,3 +167,12 @@ Select in the sidebar — pull each with `ollama pull <name>` first:
 **XTTS** ([tartuNLP/XTTS-v2-multi](https://huggingface.co/tartuNLP/XTTS-v2-multi), local, voice cloning)
 
 Voice is determined by a reference WAV file you upload — any 6+ second clean speech recording works. Supported languages: Estonian, Finnish, English, German, French, Spanish, Russian, Polish, Dutch, Italian, Portuguese, Czech, Turkish, Arabic, Chinese, Japanese, Korean, Hungarian.
+
+**Piper Italian** ([rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices), local)
+
+| Voice | Id |
+|-------|-----|
+| Paola (it_IT medium) | `it_IT-paola-medium` |
+
+Install: `pip install piper-tts onnxruntime` (or `pip install ".[piper]"`). First synthesis downloads ~60 MB into `.cache/piper/`. Note: `facebook/mms-tts-ita` does not exist on Hugging Face — Italian has MMS ASR only.
+

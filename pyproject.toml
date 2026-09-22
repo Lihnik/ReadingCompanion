@@ -1,0 +1,48 @@
+[project]
+name = "reading-companion"
+version = "0.1.0"
+description = "AI-powered reading companion with local Ollama and TTS"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "streamlit",
+    "PyMuPDF",
+    "requests",
+    "edge-tts",
+    "numpy>=2.0",
+    "soundfile",
+    "kokoro>=0.9.4",
+    "beautifulsoup4",
+    "pydub",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
+# Convenience alias for the React + FastAPI stack (same as api).
+react = [
+    "reading-companion[api]",
+]
+xtts = [
+    "coqui-tts[codec]",
+    "huggingface_hub",
+    "transformers>=4.33.0,<5.0",
+]
+piper = [
+    "piper-tts",
+    "onnxruntime",
+]
+dev = [
+    "httpx",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["companion*"]
+# backend/ is run via PYTHONPATH=.; not installed as a package.

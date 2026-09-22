@@ -1,5 +1,11 @@
+import copy
+
 MAX_CHUNK_CHARS = 5000
+MAX_VOCAB_PASSAGE_CHARS = 1800  # shorter passage → better vocab format adherence
+TTS_CACHE_MAX_ENTRIES = 40
+TTS_PROGRESSIVE_MIN_SEGMENTS = 2  # use progressive path when split yields this many+
 OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 
 SYSTEM_PROMPT_COMMENTARY = (
     "You are an insightful reading companion. When given a passage from a book, "
@@ -21,6 +27,36 @@ SYSTEM_PROMPT_CHAT = (
     "when relevant. Be conversational and helpful."
 )
 
+SYSTEM_PROMPT_LL_SUMMARY = (
+    "You are a language learning assistant. When given a passage in a foreign language, "
+    "write a concise 2-3 sentence summary in English capturing the main idea. "
+    "Do not translate word-for-word — give the gist clearly and simply."
+)
+
+SYSTEM_PROMPT_LL_VOCAB = (
+    "You are a vocabulary tutor. When given a passage in a foreign language, "
+    "select exactly 5 words or short phrases that are useful to learn. "
+    "Avoid very common words (articles, basic prepositions). "
+    "Respond with ONLY a JSON array of exactly 5 objects, each with keys "
+    '"word" and "translation". Example: '
+    '[{"word":"casa","translation":"house"},{"word":"andare","translation":"to go"}]. '
+    "No markdown fences, no commentary, no thinking tags — JSON array only."
+)
+
+# Soft preference order for the model selectbox when those models are installed.
+PREFERRED_OLLAMA_MODELS = [
+    "llama3.1:8b",
+    "llama3.2:3b",
+    "mistral:7b",
+    "gemma2:9b",
+    "qwen2.5:7b",
+    "qwen3.5:9b",
+    "deepseek-r1:8b",
+    "phi3:mini",
+]
+
+# Mutable values (lists/dicts) must never be shared across sessions — always
+# obtain a fresh copy via fresh_defaults() / apply_defaults().
 DEFAULTS = {
     "pdf_chunks": [],
     "current_chunk_idx": 0,
@@ -37,11 +73,42 @@ DEFAULTS = {
     "tts_source": "",
     "tts_cache": {},
     "tts_error": "",
+    # Progressive / playlist TTS
+    "tts_segments": [],
+    "tts_segment_audios": [],
+    "tts_segments_done": 0,
+    "tts_progressive_active": False,
+    "tts_progressive_meta": {},
+    "tts_progressive_just_added": -1,
+    "tts_player_gen": 0,
+    "tts_voice_note": "",
+    # Per-word vocab pronunciation cache: (word, lang, voice) -> (bytes, mime)
+    "vocab_audio_cache": {},
     "audiobook_bytes": b"",
     "audiobook_ext": "wav",
     "xtts_speaker_wav": b"",
     "xtts_clip_recorded": False,
+    # Per-section AI caches keyed by "pdf_name|chunk_idx|model"
+    "commentary_cache": {},
+    "question_cache": {},
+    # Language learning mode
+    "app_mode": "reading",
+    "ll_book_language": "Italian",
+    "ll_summary": "",
+    "ll_vocab": [],
+    "ll_vocab_parse_fail": None,  # {"key": cache_key, "raw": preview} on parse failure
+    # Per-section LL caches keyed by "pdf_name|chunk_idx|language|model"
+    "ll_summary_cache": {},
+    "ll_vocab_cache": {},
+    # Last known Ollama model list (used when Ollama is temporarily unreachable)
+    "ollama_models_last": [],
 }
+
+
+def fresh_defaults() -> dict:
+    """Return a deep copy of DEFAULTS so mutables are never shared."""
+    return copy.deepcopy(DEFAULTS)
+
 
 EDGE_VOICES = {
     "Aria (US, Female)": "en-US-AriaNeural",
@@ -50,6 +117,29 @@ EDGE_VOICES = {
     "Sonia (UK, Female)": "en-GB-SoniaNeural",
     "Ryan (UK, Male)": "en-GB-RyanNeural",
     "Natasha (AU, Female)": "en-AU-NatashaNeural",
+}
+
+# Edge Neural voices for single-word vocab pronunciation (book language → locale voice).
+# Prefer when available; XTTS word-mode is the fallback for missing locales / offline.
+EDGE_LANG_VOICES = {
+    "English": "en-US-AriaNeural",
+    "Italian": "it-IT-ElsaNeural",
+    "German": "de-DE-KatjaNeural",
+    "French": "fr-FR-DeniseNeural",
+    "Spanish": "es-ES-ElviraNeural",
+    "Portuguese": "pt-BR-FranciscaNeural",
+    "Dutch": "nl-NL-ColetteNeural",
+    "Polish": "pl-PL-AgnieszkaNeural",
+    "Russian": "ru-RU-SvetlanaNeural",
+    "Czech": "cs-CZ-VlastaNeural",
+    "Turkish": "tr-TR-EmelNeural",
+    "Arabic": "ar-SA-ZariyahNeural",
+    "Chinese": "zh-CN-XiaoxiaoNeural",
+    "Japanese": "ja-JP-NanamiNeural",
+    "Korean": "ko-KR-SunHiNeural",
+    "Hungarian": "hu-HU-NoemiNeural",
+    "Finnish": "fi-FI-SelmaNeural",
+    "Estonian": "et-EE-AnuNeural",
 }
 
 # Top-graded Kokoro voices (A/B quality). Prefix af_/am_ = American, bf_/bm_ = British.
@@ -85,3 +175,10 @@ XTTS_LANGUAGES = {
     "Korean": "ko",
     "Hungarian": "hu",
 }
+
+# Piper Italian (rhasspy/piper-voices). Dedicated local Italian voice; no speaker cloning.
+# Model files auto-download to .cache/piper/ on first use (~60 MB).
+PIPER_ITALIAN_VOICES = {
+    "Paola (it_IT medium)": "it_IT-paola-medium",
+}
+
