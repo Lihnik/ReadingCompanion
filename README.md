@@ -20,8 +20,8 @@ An AI-powered reading companion that lets you upload a PDF or EPUB and read it s
 - **Language Learning mode** — for foreign-language books (default book language: Italian): on-demand English summary and vocabulary, optional one-click “Prepare this section” (runs both in parallel), cached per section/language/model; prefers XTTS for non-English TTS
   - Vocabulary expects a JSON `[{word,translation},…]` response (parser also accepts WORD:/TRANSLATION: blocks, bullets, `word — translation`, and simple markdown tables). Empty parses are **not** cached — you get a warning + Retry with a raw preview.
   - **English summary** read-aloud uses **Kokoro** (`af_heart` by default) when the sidebar engine is XTTS for the book language — caption: “Summary uses English voice (Kokoro)”. Falls back to Edge if Kokoro is unavailable.
-  - **Vocabulary** — per-word ▶ plays the book-language word alone (XTTS); “Read vocabulary” concatenates word + English translation clips into **one** growing track.
-- **Progressive TTS** — long section read-aloud (especially XTTS) starts playback after the first ~200-character chunk is ready; remaining chunks append into a **single** audio bar (`Loaded N/M · ~Xs so far`) rather than stacking Part 1/2/3… players. Per-segment cache makes revisits instant.
+  - **Vocabulary** — per-word ▶ prefers **Edge neural** for the book language (e.g. Italian `it-IT-ElsaNeural`); falls back to XTTS **word mode** (`"{word}."` only, tighter sampling). Caption: `Pronouncing: …`. “Read vocabulary” still queues word + English translation clips on **one** track.
+- **Progressive TTS** — long section read-aloud (especially XTTS) starts after the first ~200-character chunk; remaining chunks load into a **segment queue** behind one audio bar (`Loaded N/M · ~Xs so far`). The player advances on `ended` instead of splicing a growing WAV/MP3 concat into the playing `src` (reduces mid-play stutter).
 
 ## Requirements
 

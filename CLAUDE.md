@@ -64,14 +64,18 @@ Default Streamlit port is 8501. The app opens automatically in the browser.
   `[{word,translation}]`; `parse_vocab_response` also accepts WORD:/TRANSLATION:
   blocks, bullets, inline separators, and markdown tables. **Never cache an empty
   parse** — show warning + raw preview + Retry. English summary TTS uses Kokoro
-  (`af_heart`) when sidebar is XTTS (Edge fallback if Kokoro missing); vocab has
-  per-word ▶ (XTTS one-shot) plus bilingual “Read vocabulary” playlist
-  (XTTS word + Edge translation) collapsed to one concatenated track.
+  (`af_heart`) when sidebar is XTTS (Edge fallback if Kokoro missing); vocab
+  per-word ▶ via `speak_vocab_word` (Edge neural for book language from
+  `EDGE_LANG_VOICES`, else XTTS word-mode with `f"{word}."` + lower temperature);
+  clears progressive playlist / bumps `tts_player_gen` so the HTML player does
+  not restore a long-section buffer. Bilingual “Read vocabulary” still queues
+  word + Edge translation clips on one track.
 - **Progressive TTS**: `speak_text` / `tts_button` split long text (XTTS ~200
   chars); first segment plays ASAP; remaining segments continue via
-  `@st.fragment(run_every=…)` and are **concatenated into one growing `tts_audio`
-  buffer** (single player + `Loaded N/M` caption; HTML `<audio>` restores
-  `currentTime` across remounts). Session keys: `tts_segments`,
+  `@st.fragment(run_every=…)`. Playback uses `_render_segment_queue_audio`
+  (option 3: one `<audio>` bar, internal segment blob queue, advance on
+  `ended` — no live concat splice into playing `src`). Full concat is built
+  only when the playlist completes. Session keys: `tts_segments`,
   `tts_segment_audios`, `tts_progressive_*`, `tts_player_gen`. Cache capped at
   `TTS_CACHE_MAX_ENTRIES`.
 - **Ollama GPU**: model residency/GPU is via Ollama (`ollama ps`), not Streamlit.

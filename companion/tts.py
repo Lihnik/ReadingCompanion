@@ -8,7 +8,7 @@ import edge_tts
 import streamlit as st
 
 from .constants import (
-    EDGE_VOICES,
+    EDGE_LANG_VOICES,
     KOKORO_VOICES,
     TTS_CACHE_MAX_ENTRIES,
     TTS_PROGRESSIVE_MIN_SEGMENTS,
@@ -237,8 +237,18 @@ def _get_xtts_conditioning(model, speaker_wav_bytes: bytes):
         os.unlink(tmp.name)
 
 
-def _speak_xtts_chunks(text_chunks: list, language: str, speaker_wav_bytes: bytes, speed: float) -> bytes:
-    """Synthesize one or more XTTS text chunks and return a single WAV."""
+def _speak_xtts_chunks(
+    text_chunks: list,
+    language: str,
+    speaker_wav_bytes: bytes,
+    speed: float,
+    *,
+    word_mode: bool = False,
+) -> bytes:
+    """Synthesize one or more XTTS text chunks and return a single WAV.
+
+    word_mode: tighter sampling for isolated words (less autoregressive ramble).
+    """
     import numpy as np
     import soundfile as sf
 
@@ -246,12 +256,25 @@ def _speak_xtts_chunks(text_chunks: list, language: str, speaker_wav_bytes: byte
     gpt_cond_latent, speaker_embedding = _get_xtts_conditioning(model, speaker_wav_bytes)
     wav_parts = []
     for chunk in text_chunks:
+        kwargs = {
+            "speed": speed,
+            "enable_text_splitting": False,
+        }
+        if word_mode:
+            # Lower temperature + stronger repetition penalty curb short-prompt hallucination.
+            kwargs.update(
+                temperature=0.55,
+                length_penalty=1.0,
+                repetition_penalty=5.0,
+                top_k=30,
+                top_p=0.8,
+            )
         out = model.inference(
             chunk,
-            language=language,
-            gpt_cond_latent=gpt_cond_latent,
-            speaker_embedding=speaker_embedding,
-            speed=speed,
+            language,
+            gpt_cond_latent,
+            speaker_embedding,
+            **kwargs,
         )
         wav_parts.append(np.squeeze(np.array(out["wav"])))
     wav = np.concatenate(wav_parts) if len(wav_parts) > 1 else wav_parts[0]
@@ -445,6 +468,92 @@ def _render_continuity_audio(audio_bytes: bytes, fmt: str, *, autoplay: bool) ->
     return True
 
 
+
+def _render_segment_queue_audio(segments: list, *, autoplay: bool) -> bool:
+    """Play segment blobs sequentially on one <audio> bar (option 3).
+
+    Restores the same segment index + currentTime across Streamlit remounts and
+    advances on ended. Never splices a growing concat into the playing src.
+    Native scrubber covers the current segment; caption shows Loaded N/M totals.
+    """
+    try:
+        import json
+        import streamlit.components.v1 as components
+    except Exception:
+        return False
+    if not segments:
+        return False
+
+    segs = []
+    for ab, fmt in segments:
+        if not ab:
+            continue
+        mime = fmt if "/" in (fmt or "") else f"audio/{fmt or 'wav'}"
+        segs.append({"mime": mime, "b64": base64.b64encode(ab).decode("ascii")})
+    if not segs:
+        return False
+
+    gen = int(st.session_state.get("tts_player_gen") or 0)
+    source = st.session_state.get("tts_source") or "tts"
+    player_id = f"{source}_{gen}"
+    auto_js = "true" if autoplay else "false"
+    segs_json = json.dumps(segs, separators=(",", ":"))
+    html = f"""<!DOCTYPE html><html><body style="margin:0;background:transparent;">
+<audio id="a" controls style="width:100%;height:40px;"></audio>
+<script>
+(function(){{
+  const KEY="rc_tts_q_"+{player_id!r};
+  const AUTO={auto_js};
+  const SEGS={segs_json};
+  const audio=document.getElementById("a");
+  let state={{i:0,t:0,playing:false}};
+  try{{ const raw=sessionStorage.getItem(KEY); if(raw) state=JSON.parse(raw); }}catch(e){{}}
+  if(!Number.isFinite(state.i) || state.i<0) state.i=0;
+  if(state.i>=SEGS.length) state.i=Math.max(0, SEGS.length-1);
+  function persist(){{
+    try{{
+      sessionStorage.setItem(KEY, JSON.stringify({{
+        i: Number(audio.dataset.seg||state.i||0),
+        t: audio.currentTime||0,
+        playing: !audio.paused
+      }}));
+    }}catch(e){{}}
+  }}
+  function playSeg(i, seek, wantPlay){{
+    if(i<0 || i>=SEGS.length) return;
+    const s=SEGS[i];
+    state.i=i;
+    audio.dataset.seg=String(i);
+    const onMeta=function(){{
+      audio.removeEventListener("loadedmetadata", onMeta);
+      const dur=audio.duration||0;
+      if(seek>0.2 && (!dur || seek<dur)){{
+        try{{ audio.currentTime=seek; }}catch(e){{}}
+      }}
+      if(wantPlay){{ audio.play().catch(function(){{}}); }}
+    }};
+    audio.addEventListener("loadedmetadata", onMeta);
+    audio.src="data:"+s.mime+";base64,"+s.b64;
+  }}
+  audio.addEventListener("timeupdate", persist);
+  audio.addEventListener("play", persist);
+  audio.addEventListener("pause", persist);
+  audio.addEventListener("ended", function(){{
+    const next=Number(audio.dataset.seg||0)+1;
+    if(next<SEGS.length){{
+      playSeg(next, 0, true);
+    }} else {{
+      persist();
+    }}
+  }});
+  const resume=state.t>0.2;
+  const wantPlay=!!state.playing || (AUTO && !resume);
+  playSeg(state.i||0, state.t||0, wantPlay);
+}})();
+</script></body></html>"""
+    components.html(html, height=52)
+    return True
+
 def clear_progressive_tts():
     st.session_state.tts_segments = []
     st.session_state.tts_segment_audios = []
@@ -475,6 +584,95 @@ def resolve_english_voice(tts_engine: str, tts_voice: str) -> tuple[str, str, st
         return "Edge TTS", tts_voice, "edge"
     # XTTS (or unknown): prefer local Kokoro English voice
     return "Kokoro", DEFAULT_EN_KOKORO_VOICE, "kokoro"
+
+
+def edge_voice_for_language(book_language: str) -> str | None:
+    """Return an Edge Neural voice id for the book language, or None if unsupported."""
+    if not book_language:
+        return None
+    return EDGE_LANG_VOICES.get(book_language) or EDGE_LANG_VOICES.get(book_language.title())
+
+
+def speak_vocab_word(
+    word: str,
+    book_language: str,
+    tts_rate: float,
+    xtts_voice: str | None = None,
+    source: str = "",
+):
+    """Pronounce one vocabulary word (never section text).
+
+    Prefers Edge neural for the book language (fast, reliable on short prompts).
+    Falls back to XTTS word-mode: only ``f"{word}."``, progressive cleared, tighter inference.
+    """
+    word = (word or "").strip()
+    if not word:
+        return
+
+    st.session_state.tts_error = ""
+    # Fully yield the player from any growing section playlist / sessionStorage restore.
+    clear_progressive_tts()
+    st.session_state.tts_segment_audios = []
+    st.session_state.tts_segments = []
+    st.session_state.tts_audio = b""
+
+    src = source or f"vocab_word:0:{word}"
+    st.session_state.tts_source = src
+    st.session_state.tts_voice_note = f"Pronouncing: {word}"
+    _bump_tts_player_gen(src)
+
+    edge_voice = edge_voice_for_language(book_language)
+    cache_word = word  # cache on bare word
+
+    if edge_voice:
+        try:
+            cache_key = _make_tts_cache_key(cache_word, edge_voice, tts_rate, "edge")
+            if cache_key in st.session_state.tts_cache:
+                audio_bytes, fmt = st.session_state.tts_cache[cache_key]
+            else:
+                audio_bytes = _speak_edge(cache_word, edge_voice, tts_rate)
+                fmt = "audio/mp3"
+                _cache_put(cache_key, audio_bytes, fmt)
+            st.session_state.tts_audio = audio_bytes
+            st.session_state.tts_format = fmt
+            return
+        except Exception as e:
+            st.session_state.tts_voice_note = (
+                f"Pronouncing: {word} · Edge unavailable; trying XTTS ({e})"
+            )
+
+    # XTTS word-mode fallback
+    lang = (xtts_voice or "").strip() or XTTS_LANGUAGES.get(book_language) or "en"
+    if not st.session_state.get("xtts_speaker_wav"):
+        st.session_state.tts_error = (
+            "Upload a speaker WAV in the sidebar to pronounce words with XTTS "
+            "(or use a language with an Edge voice)."
+        )
+        return
+
+    # Pass only the isolated word + period — never section context.
+    prompt = word.rstrip(".!?…") + "."
+    cache_key = _make_tts_cache_key(f"vocab:{prompt}", lang, tts_rate, "xtts")
+    try:
+        if cache_key in st.session_state.tts_cache:
+            audio_bytes, fmt = st.session_state.tts_cache[cache_key]
+        else:
+            audio_bytes = _speak_xtts_chunks(
+                [prompt],
+                lang,
+                st.session_state.xtts_speaker_wav,
+                tts_rate,
+                word_mode=True,
+            )
+            fmt = "audio/wav"
+            _cache_put(cache_key, audio_bytes, fmt)
+        st.session_state.tts_audio = audio_bytes
+        st.session_state.tts_format = fmt
+    except Exception as e:
+        import traceback
+        st.session_state.tts_error = (
+            f"TTS error (vocab word): {e}\n\n```\n{traceback.format_exc()}\n```"
+        )
 
 
 def speak_text(
@@ -622,10 +820,10 @@ def continue_progressive_tts() -> bool:
         st.session_state.tts_segment_audios.append((audio_bytes, fmt))
         st.session_state.tts_segments_done = done + 1
         st.session_state.tts_progressive_just_added = done
-        # Grow the single playback buffer (concat of all segments so far).
-        _rebuild_concat_audio()
+        # Queue player advances on ended — no live concat splice into the playing bar.
         if done + 1 >= len(segments):
             st.session_state.tts_progressive_active = False
+            _rebuild_concat_audio()  # final full buffer once complete
             return False
         return True
     except Exception as e:
@@ -747,9 +945,10 @@ def continue_progressive_tts_bilingual(rate: float) -> bool:
         st.session_state.tts_segment_audios.append((audio_bytes, fmt))
         st.session_state.tts_segments_done = done + 1
         st.session_state.tts_progressive_just_added = done
-        _rebuild_concat_audio()
+        # Queue player — avoid mid-play concat remount stutter.
         if done + 1 >= len(jobs):
             st.session_state.tts_progressive_active = False
+            _rebuild_concat_audio()
             return False
         return True
     except Exception as e:
@@ -854,9 +1053,12 @@ def render_tts_player():
     audio_bytes = st.session_state.get("tts_audio") or b""
     fmt = st.session_state.get("tts_format") or "audio/wav"
 
-    # Progressive / multi-segment: one bar that grows as chunks append
+    # Progressive / multi-segment: one bar; JS queues segment blobs (no live concat splice)
     if total > 1 and (audios or audio_bytes):
-        secs = estimate_audio_seconds(audio_bytes, fmt)
+        if audios:
+            secs = sum(estimate_audio_seconds(ab, f) for ab, f in audios)
+        else:
+            secs = estimate_audio_seconds(audio_bytes, fmt)
         if active:
             st.caption(f"Loaded {done}/{total} · ~{int(round(secs))}s so far")
         elif done >= total > 0:
@@ -867,9 +1069,17 @@ def render_tts_player():
         autoplay = just == 0  # only auto-start on first segment
         col_audio, col_stop = st.columns([5, 1])
         with col_audio:
-            used_html = _render_continuity_audio(audio_bytes, fmt, autoplay=autoplay)
+            used_html = False
+            if audios:
+                used_html = _render_segment_queue_audio(audios, autoplay=autoplay)
             if not used_html:
-                # Fallback: single st.audio (may reset seek on remount when buffer grows)
+                # Fallback: concat buffer + continuity restore (may stutter on growth)
+                if audios and not audio_bytes:
+                    audio_bytes, fmt = concat_audio_bytes(audios)
+                    st.session_state.tts_audio = audio_bytes
+                    st.session_state.tts_format = fmt
+                used_html = _render_continuity_audio(audio_bytes, fmt, autoplay=autoplay)
+            if not used_html:
                 st.audio(audio_bytes, format=fmt, autoplay=autoplay)
         with col_stop:
             if st.button("Stop", key="btn_stop"):

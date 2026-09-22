@@ -117,6 +117,29 @@ EDGE_VOICES = {
     "Natasha (AU, Female)": "en-AU-NatashaNeural",
 }
 
+# Edge Neural voices for single-word vocab pronunciation (book language → locale voice).
+# Prefer when available; XTTS word-mode is the fallback for missing locales / offline.
+EDGE_LANG_VOICES = {
+    "English": "en-US-AriaNeural",
+    "Italian": "it-IT-ElsaNeural",
+    "German": "de-DE-KatjaNeural",
+    "French": "fr-FR-DeniseNeural",
+    "Spanish": "es-ES-ElviraNeural",
+    "Portuguese": "pt-BR-FranciscaNeural",
+    "Dutch": "nl-NL-ColetteNeural",
+    "Polish": "pl-PL-AgnieszkaNeural",
+    "Russian": "ru-RU-SvetlanaNeural",
+    "Czech": "cs-CZ-VlastaNeural",
+    "Turkish": "tr-TR-EmelNeural",
+    "Arabic": "ar-SA-ZariyahNeural",
+    "Chinese": "zh-CN-XiaoxiaoNeural",
+    "Japanese": "ja-JP-NanamiNeural",
+    "Korean": "ko-KR-SunHiNeural",
+    "Hungarian": "hu-HU-NoemiNeural",
+    "Finnish": "fi-FI-SelmaNeural",
+    "Estonian": "et-EE-AnuNeural",
+}
+
 # Top-graded Kokoro voices (A/B quality). Prefix af_/am_ = American, bf_/bm_ = British.
 KOKORO_VOICES = {
     "Heart (US, Female) A": "af_heart",

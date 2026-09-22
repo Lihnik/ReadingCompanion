@@ -40,6 +40,7 @@ from .tts import (
     maybe_continue_progressive,
     resolve_english_voice,
     speak_text,
+    speak_vocab_word,
     tts_button,
 )
 
@@ -385,14 +386,14 @@ def _render_ll_vocab_table(
             if can_speak and word:
                 if st.button("▶", key=f"btn_vocab_word_{i}", help=f"Pronounce: {word}"):
                     eng = _engine_key(tts_engine)
+                    xtts_lang = tts_voice if eng == "xtts" else None
                     with st.spinner(f"Pronouncing “{word}”…"):
-                        speak_text(
+                        speak_vocab_word(
                             word,
-                            tts_voice,
+                            book_language,
                             tts_rate,
-                            eng,
-                            source=f"vocab_word_{i}",
-                            progressive=False,
+                            xtts_voice=xtts_lang,
+                            source=f"vocab_word:{i}:{word}",
                         )
                     st.rerun()
             else:
