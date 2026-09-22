@@ -17,6 +17,7 @@ An AI-powered reading companion that lets you upload a PDF or EPUB and read it s
 - **Multi-column PDF support** — detects two-column layouts and reads left column before right
 - **Reasoning model support** — `<think>` blocks from models like Qwen3 and DeepSeek-R1 are silently stripped; token budgets sized accordingly
 - **Live model list** — sidebar model selectbox is filled from Ollama `/api/tags` (falls back to recommended names if Ollama is down)
+- **Language Learning mode** — for foreign-language books (default book language: Italian): on-demand English summary and vocabulary, optional one-click “Prepare this section” (runs both in parallel), cached per section/language/model; prefers XTTS for non-English TTS
 
 ## Requirements
 
@@ -59,6 +60,8 @@ pip install torch torchaudio --force-reinstall --index-url https://download.pyto
 ```
 
 Both engines automatically use the GPU if CUDA is detected; fall back to CPU otherwise.
+
+LLM GPU usage is handled by **Ollama** (not Streamlit). Check loaded models with `ollama ps`.
 
 **XTTS engine (Estonian/multilingual TTS):**
 

@@ -24,6 +24,20 @@ SYSTEM_PROMPT_CHAT = (
     "when relevant. Be conversational and helpful."
 )
 
+SYSTEM_PROMPT_LL_SUMMARY = (
+    "You are a language learning assistant. When given a passage in a foreign language, "
+    "write a concise 2-3 sentence summary in English capturing the main idea. "
+    "Do not translate word-for-word — give the gist clearly and simply."
+)
+
+SYSTEM_PROMPT_LL_VOCAB = (
+    "You are a vocabulary tutor. When given a passage in a foreign language, "
+    "select exactly 5 words or short phrases that are useful to learn. "
+    "Avoid very common words (articles, basic prepositions). "
+    "For each entry use EXACTLY this format on separate lines:\n"
+    "WORD: <word>\nTRANSLATION: <English meaning>\n---"
+)
+
 # Soft preference order for the model selectbox when those models are installed.
 PREFERRED_OLLAMA_MODELS = [
     "llama3.1:8b",
@@ -61,6 +75,14 @@ DEFAULTS = {
     # Per-section AI caches keyed by "pdf_name|chunk_idx|model"
     "commentary_cache": {},
     "question_cache": {},
+    # Language learning mode
+    "app_mode": "reading",
+    "ll_book_language": "Italian",
+    "ll_summary": "",
+    "ll_vocab": [],
+    # Per-section LL caches keyed by "pdf_name|chunk_idx|language|model"
+    "ll_summary_cache": {},
+    "ll_vocab_cache": {},
     # Last known Ollama model list (used when Ollama is temporarily unreachable)
     "ollama_models_last": [],
 }

@@ -11,7 +11,13 @@ from .constants import (
     SYSTEM_PROMPT_COMMENTARY,
     SYSTEM_PROMPT_QUESTION,
     SYSTEM_PROMPT_CHAT,
+    SYSTEM_PROMPT_LL_SUMMARY,
+    SYSTEM_PROMPT_LL_VOCAB,
 )
+
+# Short tasks (commentary, question, LL summary/vocab) stay small; chat/stream keeps its own default.
+DEFAULT_NUM_PREDICT = 512
+DEFAULT_KEEP_ALIVE = "10m"
 
 
 def _strip_thinking(text: str) -> str:
@@ -19,12 +25,19 @@ def _strip_thinking(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
-def call_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: int = 4000) -> str:
+def call_ollama(
+    prompt: str,
+    model: str,
+    system_prompt: str = "",
+    num_predict: int = DEFAULT_NUM_PREDICT,
+    keep_alive: str = DEFAULT_KEEP_ALIVE,
+) -> str:
     payload = {
         "model": model,
         "prompt": prompt,
         "system": system_prompt,
         "stream": False,
+        "keep_alive": keep_alive,
         "options": {"temperature": 0.7, "num_predict": num_predict},
     }
     try:
@@ -43,12 +56,19 @@ def call_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: i
         return f"ERROR: {e}"
 
 
-def stream_ollama(prompt: str, model: str, system_prompt: str = "", num_predict: int = 2048):
+def stream_ollama(
+    prompt: str,
+    model: str,
+    system_prompt: str = "",
+    num_predict: int = 2048,
+    keep_alive: str = DEFAULT_KEEP_ALIVE,
+):
     payload = {
         "model": model,
         "prompt": prompt,
         "system": system_prompt,
         "stream": True,
+        "keep_alive": keep_alive,
         "options": {"temperature": 0.7, "num_predict": num_predict},
     }
     try:
@@ -154,3 +174,36 @@ def build_summary_prompt(chunk_text: str) -> str:
         f"Summarize the following passage in 3-5 bullet points. "
         f"Focus on the most important ideas.\n\n{chunk_text[:MAX_CHUNK_CHARS]}\n\nSummary:"
     )
+
+
+def build_ll_summary_prompt(chunk_text: str, source_lang: str) -> str:
+    return (
+        f"The following passage is written in {source_lang}. "
+        f"Summarize it in English in 2-3 sentences:\n\n"
+        f"---\n{chunk_text[:MAX_CHUNK_CHARS]}\n---\n\nEnglish summary:"
+    )
+
+
+def build_ll_vocab_prompt(chunk_text: str, source_lang: str) -> str:
+    return (
+        f"From this {source_lang} passage, select exactly 5 vocabulary words to teach.\n\n"
+        f"---\n{chunk_text[:MAX_CHUNK_CHARS]}\n---\n\n"
+        f"Output only the 5 entries in the required format:"
+    )
+
+
+def parse_vocab_response(text: str) -> list:
+    entries = []
+    for block in text.split("---"):
+        block = block.strip()
+        if not block:
+            continue
+        word, translation = "", ""
+        for line in block.splitlines():
+            if line.upper().startswith("WORD:"):
+                word = line.split(":", 1)[-1].strip()
+            elif line.upper().startswith("TRANSLATION:"):
+                translation = line.split(":", 1)[-1].strip()
+        if word and translation:
+            entries.append({"word": word, "translation": translation})
+    return entries[:5]

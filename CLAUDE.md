@@ -56,6 +56,13 @@ Default Streamlit port is 8501. The app opens automatically in the browser.
 - **On-demand AI**: section text renders first; commentary and comprehension questions
   are generated via “Generate insight” / “Get a question” and cached in
   `commentary_cache` / `question_cache` keyed by `pdf_name|chunk_idx|model`
+- **Language Learning mode**: sidebar Mode radio; on-demand “English summary” /
+  “Vocabulary” (plus optional “Prepare this section” via ThreadPoolExecutor);
+  caches in `ll_summary_cache` / `ll_vocab_cache` keyed by
+  `pdf_name|chunk_idx|language|model`. Non-English books prefer XTTS; XTTS
+  language stays synced with `ll_book_language`
+- **Ollama GPU**: model residency/GPU is via Ollama (`ollama ps`), not Streamlit.
+  `call_ollama` uses short `num_predict` defaults (~512) and `keep_alive="10m"`
 - **Ollama models**: sidebar selectbox is driven by `fetch_ollama_models()` (`/api/tags`);
   preferred names in `PREFERRED_OLLAMA_MODELS` are a soft sort order / offline fallback
 - **TTS engines**: Edge TTS (internet, MP3), Kokoro-82M (local English WAV), XTTS (local
