@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { streamChat, startTextTts, type ChatMsg, type TtsOpts } from './api';
+import { getChat, putChat, streamChat, startTextTts, type ChatMsg, type TtsOpts } from './api';
 
 type Props = {
   bookId: string | null;
@@ -25,16 +25,32 @@ export function ChatPanel({
   const listRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const prevSection = useRef(sectionIdx);
+  const loadGen = useRef(0);
 
   useEffect(() => {
     if (clearOnSectionChange && prevSection.current !== sectionIdx) {
-      setMessages([]);
       setError('');
       abortRef.current?.abort();
       setStreaming(false);
     }
     prevSection.current = sectionIdx;
   }, [sectionIdx, clearOnSectionChange]);
+
+  useEffect(() => {
+    if (!bookId) {
+      setMessages([]);
+      return;
+    }
+    const gen = ++loadGen.current;
+    setMessages([]);
+    getChat(bookId, sectionIdx)
+      .then((r) => {
+        if (loadGen.current === gen) setMessages(r.messages || []);
+      })
+      .catch(() => {
+        if (loadGen.current === gen) setMessages([]);
+      });
+  }, [bookId, sectionIdx]);
 
   useEffect(() => {
     const el = listRef.current;
@@ -52,8 +68,9 @@ export function ChatPanel({
     setStreaming(true);
     const ac = new AbortController();
     abortRef.current = ac;
+    let assistantText = '';
     try {
-      await streamChat(
+      assistantText = await streamChat(
         {
           book_id: bookId,
           section_idx: sectionIdx,
@@ -73,6 +90,13 @@ export function ChatPanel({
         },
         ac.signal,
       );
+      const finalMessages: ChatMsg[] = [
+        ...messages,
+        userMsg,
+        { role: 'assistant', content: assistantText },
+      ];
+      setMessages(finalMessages);
+      void putChat(bookId, sectionIdx, finalMessages).catch(() => undefined);
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
         setError(e instanceof Error ? e.message : String(e));

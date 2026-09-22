@@ -23,6 +23,7 @@ from companion.tts import (
     split_for_tts,
 )
 
+from backend.app import db
 from backend.app.store import AudiobookJob, TtsJob, TtsSegment, store
 
 router = APIRouter()
@@ -176,11 +177,10 @@ async def upload_speaker(file: UploadFile = File(...)):
 
 @router.post("/section/start")
 def start_section_tts(body: SectionStartRequest):
-    book = store.books.get(body.book_id)
-    if not book:
-        raise HTTPException(404, "Book not found")
-    section = next((s for s in book.sections if s["index"] == body.section_idx), None)
+    section = db.get_section(body.book_id, body.section_idx)
     if not section:
+        if not db.get_book_meta(body.book_id):
+            raise HTTPException(404, "Book not found")
         raise HTTPException(404, "Section not found")
 
     ek, voice_id = _resolve_voice_id(body.engine, body.voice)
@@ -383,20 +383,20 @@ def _run_audiobook(job: AudiobookJob, sections: list[dict]) -> None:
 
 @router.post("/audiobook/start")
 def start_audiobook(body: AudiobookStartRequest):
-    book = store.books.get(body.book_id)
+    book = db.get_book(body.book_id)
     if not book:
         raise HTTPException(404, "Book not found")
     if body.start_idx > body.end_idx:
         raise HTTPException(400, "start_idx must be ≤ end_idx")
 
-    selected = [s for s in book.sections if body.start_idx <= s["index"] <= body.end_idx]
+    selected = [s for s in book["sections"] if body.start_idx <= s["index"] <= body.end_idx]
     if not selected:
         raise HTTPException(404, "No sections in range")
 
     ek, voice_id = _resolve_voice_id(body.engine, body.voice)
     speaker = _speaker_bytes(ek, body.speaker_key)
 
-    base = re.sub(r"\.(pdf|epub)$", "", book.filename, flags=re.IGNORECASE)
+    base = re.sub(r"\.(pdf|epub)$", "", book["filename"], flags=re.IGNORECASE)
     job_id = store.new_job_id()
     job = AudiobookJob(
         job_id=job_id,

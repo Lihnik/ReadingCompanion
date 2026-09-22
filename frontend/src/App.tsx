@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  deleteBook,
   fetchSummary,
   fetchVocab,
   fetchWordAudio,
+  getBook,
   getSection,
+  listBooks,
   listModels,
   listVoices,
+  patchBook,
   startSectionTts,
   uploadBook,
   uploadSpeaker,
+  type BookListItem,
   type SectionMeta,
   type VocabEntry,
 } from './api';
@@ -75,6 +80,7 @@ export default function App() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [wordBusy, setWordBusy] = useState<string | null>(null);
   const wordCache = useMemo(() => new Map<string, string>(), []);
+  const [library, setLibrary] = useState<BookListItem[]>([]);
 
   const ttsOpts = useMemo(
     () => ({
@@ -115,6 +121,15 @@ export default function App() {
     }
   }, [engine, voices]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const refreshLibrary = useCallback(async () => {
+    try {
+      const r = await listBooks();
+      setLibrary(r.books);
+    } catch {
+      /* ignore listing errors on refresh */
+    }
+  }, []);
+
   const loadSection = useCallback(async (bid: string, idx: number) => {
     setBusy('section');
     setError('');
@@ -126,11 +141,54 @@ export default function App() {
       setSectionText(s.text);
       setSummary('');
       setVocab([]);
+      void patchBook(bid, { last_section_idx: s.index }).then(() => refreshLibrary());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
+  }, [refreshLibrary]);
+
+  const openBook = useCallback(
+    async (bid: string, preferIdx?: number) => {
+      setBusy('book');
+      setError('');
+      try {
+        const meta = await getBook(bid);
+        setBookId(meta.book_id);
+        setFilename(meta.filename);
+        setSections(meta.sections);
+        if (meta.language) setLanguage(meta.language);
+        if (meta.app_mode === 'reading' || meta.app_mode === 'language_learning') {
+          setAppMode(meta.app_mode);
+        }
+        const idx =
+          preferIdx ??
+          meta.last_section_idx ??
+          (meta.sections.length ? meta.sections[0].index : 0);
+        if (meta.sections.length) {
+          await loadSection(meta.book_id, idx);
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [loadSection],
+  );
+
+  useEffect(() => {
+    listBooks()
+      .then((r) => {
+        setLibrary(r.books);
+        if (r.books.length) {
+          const recent = r.books[0];
+          void openBook(recent.book_id, recent.last_section_idx);
+        }
+      })
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- restore once on mount
   }, []);
 
   const sectionPos = useMemo(() => {
@@ -156,13 +214,39 @@ export default function App() {
       setBookId(res.book_id);
       setFilename(res.filename);
       setSections(res.sections);
+      await refreshLibrary();
       if (res.sections.length) {
-        await loadSection(res.book_id, res.sections[0].index);
+        const idx = res.last_section_idx ?? res.sections[0].index;
+        await loadSection(res.book_id, idx);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
+    }
+  };
+
+  const onDeleteBook = async (bid: string) => {
+    if (!window.confirm('Delete this book and its AI/chat cache?')) return;
+    try {
+      await deleteBook(bid);
+      await refreshLibrary();
+      if (bookId === bid) {
+        setBookId(null);
+        setFilename('');
+        setSections([]);
+        setSectionText('');
+        setSectionTitle('');
+        setSummary('');
+        setVocab([]);
+        const remaining = (await listBooks()).books;
+        setLibrary(remaining);
+        if (remaining.length) {
+          void openBook(remaining[0].book_id, remaining[0].last_section_idx);
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -300,14 +384,20 @@ export default function App() {
           <button
             type="button"
             className={appMode === 'language_learning' ? 'active' : ''}
-            onClick={() => setAppMode('language_learning')}
+            onClick={() => {
+              setAppMode('language_learning');
+              if (bookId) void patchBook(bookId, { app_mode: 'language_learning' });
+            }}
           >
             Language Learning
           </button>
           <button
             type="button"
             className={appMode === 'reading' ? 'active' : ''}
-            onClick={() => setAppMode('reading')}
+            onClick={() => {
+              setAppMode('reading');
+              if (bookId) void patchBook(bookId, { app_mode: 'reading' });
+            }}
           >
             Reading
           </button>
@@ -323,6 +413,42 @@ export default function App() {
         </label>
         {filename && <div className="muted">{filename}</div>}
 
+        <div className="library-block">
+          <h3 className="library-heading">Library</h3>
+          {library.length === 0 ? (
+            <div className="muted">No saved books yet</div>
+          ) : (
+            <ul className="library-list">
+              {library.map((b) => (
+                <li key={b.book_id} className={b.book_id === bookId ? 'active' : ''}>
+                  <button
+                    type="button"
+                    className="library-item"
+                    onClick={() => void openBook(b.book_id, b.last_section_idx)}
+                    title={b.filename}
+                  >
+                    <div className="library-name">{b.filename}</div>
+                    <div className="muted">
+                      {b.section_count} sections · idx {b.last_section_idx}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm library-delete"
+                    title="Delete book"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void onDeleteBook(b.book_id);
+                    }}
+                  >
+                    ×
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
         <label className="field">
           Ollama model {modelLive ? <span className="ok">● live</span> : <span>● fallback</span>}
           <select value={model} onChange={(e) => setModel(e.target.value)}>
@@ -337,7 +463,14 @@ export default function App() {
         {appMode === 'language_learning' && (
           <label className="field">
             Book language
-            <select value={language} onChange={(e) => setLanguage(e.target.value)}>
+            <select
+              value={language}
+              onChange={(e) => {
+                const lang = e.target.value;
+                setLanguage(lang);
+                if (bookId) void patchBook(bookId, { language: lang }).then(() => refreshLibrary());
+              }}
+            >
               {LANGS.map((l) => (
                 <option key={l} value={l}>
                   {l}

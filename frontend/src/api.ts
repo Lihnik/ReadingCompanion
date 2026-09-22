@@ -33,14 +33,85 @@ export async function health() {
   return json<{ status: string }>(await fetch(`${BASE}/api/health`));
 }
 
+export type BookListItem = {
+  book_id: string;
+  filename: string;
+  section_count: number;
+  created_at: string;
+  updated_at: string;
+  last_section_idx: number;
+  language: string | null;
+  app_mode?: string | null;
+};
+
 export async function uploadBook(file: File) {
   const fd = new FormData();
   fd.append('file', file);
   return json<{
     book_id: string;
     filename: string;
+    last_section_idx?: number;
     sections: SectionMeta[];
   }>(await fetch(`${BASE}/api/books/upload`, { method: 'POST', body: fd }));
+}
+
+export async function listBooks() {
+  return json<{ books: BookListItem[] }>(await fetch(`${BASE}/api/books`));
+}
+
+export async function getBook(bookId: string) {
+  return json<{
+    book_id: string;
+    filename: string;
+    last_section_idx: number;
+    language: string | null;
+    app_mode: string | null;
+    created_at: string;
+    updated_at: string;
+    sections: SectionMeta[];
+  }>(await fetch(`${BASE}/api/books/${bookId}`));
+}
+
+export async function patchBook(
+  bookId: string,
+  body: { last_section_idx?: number; language?: string; app_mode?: string },
+) {
+  return json<{
+    book_id: string;
+    filename: string;
+    last_section_idx: number;
+    language: string | null;
+    app_mode: string | null;
+    sections: SectionMeta[];
+  }>(
+    await fetch(`${BASE}/api/books/${bookId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+export async function deleteBook(bookId: string) {
+  return json<{ ok: boolean; book_id: string }>(
+    await fetch(`${BASE}/api/books/${bookId}`, { method: 'DELETE' }),
+  );
+}
+
+export async function getChat(bookId: string, sectionIdx: number) {
+  return json<{ messages: ChatMsg[] }>(
+    await fetch(`${BASE}/api/ai/chat/${bookId}/${sectionIdx}`),
+  );
+}
+
+export async function putChat(bookId: string, sectionIdx: number, messages: ChatMsg[]) {
+  return json<{ messages: ChatMsg[] }>(
+    await fetch(`${BASE}/api/ai/chat/${bookId}/${sectionIdx}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages }),
+    }),
+  );
 }
 
 export async function getSection(bookId: string, idx: number) {
@@ -64,6 +135,7 @@ export async function fetchSummary(opts: {
   section_idx: number;
   language: string;
   model: string;
+  force?: boolean;
 }) {
   return json<{ summary: string }>(
     await fetch(`${BASE}/api/ai/summary`, {
@@ -79,6 +151,7 @@ export async function fetchVocab(opts: {
   section_idx: number;
   language: string;
   model: string;
+  force?: boolean;
 }) {
   return json<{ vocab: VocabEntry[]; parse_ok: boolean; raw_preview: string | null }>(
     await fetch(`${BASE}/api/ai/vocab`, {
@@ -93,6 +166,7 @@ export async function fetchCommentary(opts: {
   book_id: string;
   section_idx: number;
   model: string;
+  force?: boolean;
 }) {
   return json<{ commentary: string }>(
     await fetch(`${BASE}/api/ai/commentary`, {
@@ -107,6 +181,7 @@ export async function fetchQuestion(opts: {
   book_id: string;
   section_idx: number;
   model: string;
+  force?: boolean;
 }) {
   return json<{ question: string }>(
     await fetch(`${BASE}/api/ai/question`, {
@@ -137,6 +212,7 @@ export async function fetchSectionSummary(opts: {
   book_id: string;
   section_idx: number;
   model: string;
+  force?: boolean;
 }) {
   return json<{ summary: string }>(
     await fetch(`${BASE}/api/ai/section-summary`, {

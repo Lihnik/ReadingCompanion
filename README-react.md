@@ -7,12 +7,25 @@ Additive React rewrite of the Streamlit app. The classic Streamlit entrypoint (`
 ```
 /backend          FastAPI app (uvicorn)
   app/main.py
+  app/db.py       SQLite persistence (books, sections, AI cache, chat)
   app/routers/    books, ai, tts, ollama
 /companion/       Shared engines (PDF/EPUB, Ollama, Edge/Kokoro/XTTS/Piper Italian)
 /frontend         Vite + React + TypeScript
+.data/            SQLite DB (gitignored): reading_companion.sqlite3
 ```
 
 Repo root is added to `PYTHONPATH` so FastAPI can `import companion…`.
+
+## Data persistence
+
+Books, sections, AI caches (summary / vocab / commentary / question / section-summary), and chat history are stored in SQLite:
+
+- Default path: `.data/reading_companion.sqlite3` under the repo root
+- Override directory with env `RC_DATA_DIR` (file is still `reading_companion.sqlite3` inside that dir)
+- Survives uvicorn restarts; TTS jobs / word cache / speaker WAVs stay in-memory (ephemeral)
+- To wipe: stop the API and delete `.data/reading_companion.sqlite3` (or the whole `.data/` folder)
+
+The sidebar **Library** lists saved books; refresh restores the most recent book + `last_section_idx`.
 
 ## Prerequisites
 
@@ -133,7 +146,7 @@ Then **restart uvicorn** so the API process picks up the new packages.
 ### Shared
 
 - Streaming **chat** (SSE) grounded in the current section; “Read last response” via progressive TTS
-- Sidebar: Ollama model picker, TTS engine (Edge / Kokoro / XTTS / Piper Italian), voice/lang, rate, XTTS speaker WAV, book language (LL)
+- Sidebar **Library** (restore / delete books) + Ollama model picker, TTS engine (Edge / Kokoro / XTTS / Piper Italian), voice/lang, rate, XTTS speaker WAV, book language (LL)
 - Prev / Next + jump-to-section; **Stop** TTS
 - **Audiobook export** — section range → background job → download link
 - Two-column desktop layout: reading/LL left, chat (+ LL cards) right
@@ -152,15 +165,21 @@ Then **restart uvicorn** so the API process picks up the new packages.
 | Method | Path | Notes |
 |--------|------|--------|
 | GET | `/api/health` | liveness |
-| POST | `/api/books/upload` | PDF/EPUB → `book_id` + sections |
+| POST | `/api/books/upload` | PDF/EPUB → `book_id` + sections (persisted) |
+| GET | `/api/books` | list books (by `updated_at` desc) |
+| GET | `/api/books/{id}` | metadata + section list |
 | GET | `/api/books/{id}/sections/{idx}` | section text |
-| POST | `/api/ai/summary` | LL English gist (`stream` optional SSE) |
-| POST | `/api/ai/vocab` | `[{word,translation},…]` |
+| PATCH | `/api/books/{id}` | `{ last_section_idx?, language?, app_mode? }` |
+| DELETE | `/api/books/{id}` | book + sections + AI cache + chat |
+| POST | `/api/ai/summary` | LL English gist (`force` bypasses cache; `stream` SSE) |
+| POST | `/api/ai/vocab` | `[{word,translation},…]` (cached; `force` optional) |
 | POST | `/api/ai/chat` | SSE streaming chat |
-| POST | `/api/ai/commentary` | reading-mode insight |
-| POST | `/api/ai/question` | comprehension question |
-| POST | `/api/ai/feedback` | evaluate answer |
-| POST | `/api/ai/section-summary` | reading-mode bullets |
+| GET | `/api/ai/chat/{book_id}/{section_idx}` | saved chat thread |
+| PUT | `/api/ai/chat/{book_id}/{section_idx}` | replace chat thread `{ messages }` |
+| POST | `/api/ai/commentary` | reading-mode insight (cached; `force`) |
+| POST | `/api/ai/question` | comprehension question (cached; `force`) |
+| POST | `/api/ai/feedback` | evaluate answer (not cached) |
+| POST | `/api/ai/section-summary` | reading-mode bullets (cached; `force`) |
 | GET | `/api/ollama/models` | live tags |
 | POST | `/api/tts/speaker` | upload XTTS speaker WAV |
 | POST | `/api/tts/section/start` | progressive section job |
@@ -180,6 +199,6 @@ Then **restart uvicorn** so the API process picks up the new packages.
 ## Known gaps
 
 - Cinematic hero / CloudFront video (out of scope)
-- Persistent disk store (books/jobs are in-memory)
+- TTS / audiobook jobs remain in-memory (books + AI/chat are SQLite)
 - Polished XTTS mic-record UI (file upload only)
 - Edge audiobook concat needs `pydub` + ffmpeg; falls back to error if missing

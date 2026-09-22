@@ -1,18 +1,10 @@
-"""In-memory book and TTS job stores for the MVP API."""
+"""Ephemeral TTS/audiobook/word/speaker stores; books live in SQLite (see db.py)."""
 
 from __future__ import annotations
 
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
-
-
-@dataclass
-class BookRecord:
-    book_id: str
-    filename: str
-    sections: list[dict[str, Any]]  # {index, title, text, page?}
 
 
 @dataclass
@@ -63,7 +55,7 @@ class AudiobookJob:
 
 class Store:
     def __init__(self) -> None:
-        self.books: dict[str, BookRecord] = {}
+        # Books/sections/AI/chat are persisted via backend.app.db
         self.tts_jobs: dict[str, TtsJob] = {}
         self.audiobook_jobs: dict[str, AudiobookJob] = {}
         self.word_cache: dict[tuple[str, str], tuple[bytes, str]] = {}

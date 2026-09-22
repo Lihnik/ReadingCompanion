@@ -361,6 +361,58 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   border-color: rgba(58, 74, 106, 0.85);
 }
 
+
+.library-block {
+  margin: 0.75rem 0 1rem;
+}
+.library-heading {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0 0 0.4rem;
+  font-weight: 600;
+}
+.library-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 9rem;
+  overflow-y: auto;
+}
+.library-list li {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+.library-list li.active .library-item {
+  border-color: rgba(125, 211, 252, 0.45);
+  background: rgba(125, 211, 252, 0.12);
+}
+.library-item {
+  flex: 1;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: inherit;
+  padding: 0.4rem 0.55rem;
+  cursor: pointer;
+}
+.library-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.library-name {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.library-delete {
+  flex-shrink: 0;
+  min-width: 1.75rem;
+  color: var(--danger);
+}
+
 .muted { color: var(--muted); font-size: 0.82rem; }
 .error { color: var(--danger); font-size: 0.85rem; margin: 0.4rem 0; }
 .ok { color: var(--ok); }
