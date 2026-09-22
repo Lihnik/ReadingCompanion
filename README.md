@@ -18,6 +18,10 @@ An AI-powered reading companion that lets you upload a PDF or EPUB and read it s
 - **Reasoning model support** — `<think>` blocks from models like Qwen3 and DeepSeek-R1 are silently stripped; token budgets sized accordingly
 - **Live model list** — sidebar model selectbox is filled from Ollama `/api/tags` (falls back to recommended names if Ollama is down)
 - **Language Learning mode** — for foreign-language books (default book language: Italian): on-demand English summary and vocabulary, optional one-click “Prepare this section” (runs both in parallel), cached per section/language/model; prefers XTTS for non-English TTS
+  - Vocabulary expects a JSON `[{word,translation},…]` response (parser also accepts WORD:/TRANSLATION: blocks, bullets, `word — translation`, and simple markdown tables). Empty parses are **not** cached — you get a warning + Retry with a raw preview.
+  - **English summary** read-aloud auto-routes to an English voice (Edge) when the sidebar engine is XTTS for the book language — caption: “Summary uses English voice”.
+  - **Vocabulary** read-aloud speaks each word in the book language (XTTS) and each translation in English (Edge).
+- **Progressive TTS** — long section read-aloud (especially XTTS) starts playback after the first ~200-character chunk is ready; remaining parts generate in the background and appear as additional players (“Generating remaining audio… N/M”). Per-segment cache makes revisits instant.
 
 ## Requirements
 

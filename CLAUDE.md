@@ -60,7 +60,16 @@ Default Streamlit port is 8501. The app opens automatically in the browser.
   “Vocabulary” (plus optional “Prepare this section” via ThreadPoolExecutor);
   caches in `ll_summary_cache` / `ll_vocab_cache` keyed by
   `pdf_name|chunk_idx|language|model`. Non-English books prefer XTTS; XTTS
-  language stays synced with `ll_book_language`
+  language stays synced with `ll_book_language`. Vocab prompt asks for JSON
+  `[{word,translation}]`; `parse_vocab_response` also accepts WORD:/TRANSLATION:
+  blocks, bullets, inline separators, and markdown tables. **Never cache an empty
+  parse** — show warning + raw preview + Retry. English summary TTS auto-routes
+  to Edge English when sidebar is XTTS; vocab TTS is bilingual (XTTS word + Edge
+  translation).
+- **Progressive TTS**: `speak_text` / `tts_button` split long text (XTTS ~200
+  chars); first segment plays ASAP; remaining segments continue via
+  `@st.fragment(run_every=…)` playlist. Session keys: `tts_segments`,
+  `tts_segment_audios`, `tts_progressive_*`. Cache capped at `TTS_CACHE_MAX_ENTRIES`.
 - **Ollama GPU**: model residency/GPU is via Ollama (`ollama ps`), not Streamlit.
   `call_ollama` uses short `num_predict` defaults (~512) and `keep_alive="10m"`
 - **Ollama models**: sidebar selectbox is driven by `fetch_ollama_models()` (`/api/tags`);

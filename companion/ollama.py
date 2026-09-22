@@ -5,6 +5,7 @@ import requests
 
 from .constants import (
     MAX_CHUNK_CHARS,
+    MAX_VOCAB_PASSAGE_CHARS,
     OLLAMA_URL,
     OLLAMA_TAGS_URL,
     PREFERRED_OLLAMA_MODELS,
@@ -185,25 +186,161 @@ def build_ll_summary_prompt(chunk_text: str, source_lang: str) -> str:
 
 
 def build_ll_vocab_prompt(chunk_text: str, source_lang: str) -> str:
+    passage = chunk_text[:MAX_VOCAB_PASSAGE_CHARS]
     return (
         f"From this {source_lang} passage, select exactly 5 vocabulary words to teach.\n\n"
-        f"---\n{chunk_text[:MAX_CHUNK_CHARS]}\n---\n\n"
-        f"Output only the 5 entries in the required format:"
+        f"---\n{passage}\n---\n\n"
+        f'Output ONLY a JSON array: [{{"word":"...","translation":"..."}}, ...] '
+        f"with exactly 5 objects. No other text:"
     )
 
 
-def parse_vocab_response(text: str) -> list:
+def _clean_vocab_pair(word: str, translation: str) -> dict | None:
+    word = (word or "").strip().strip("*`\"'")
+    translation = (translation or "").strip().strip("*`\"'")
+    # Drop leftover labels if a model echoed them
+    for prefix in ("WORD:", "Word:", "TRANSLATION:", "Translation:"):
+        if word.upper().startswith(prefix.upper()):
+            word = word.split(":", 1)[-1].strip()
+        if translation.upper().startswith(prefix.upper()):
+            translation = translation.split(":", 1)[-1].strip()
+    if not word or not translation:
+        return None
+    if len(word) > 80 or len(translation) > 200:
+        return None
+    return {"word": word, "translation": translation}
+
+
+def _parse_vocab_json(text: str) -> list:
+    """Try to extract a JSON list of {word, translation} from model output."""
+    candidates = []
+    stripped = text.strip()
+    # Fenced ```json ... ```
+    fence = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if fence:
+        candidates.append(fence.group(1))
+    # First top-level array
+    start = stripped.find("[")
+    end = stripped.rfind("]")
+    if start != -1 and end > start:
+        candidates.append(stripped[start : end + 1])
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+
+    for raw in candidates:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        items = data if isinstance(data, list) else data.get("vocabulary") or data.get("words") or data.get("entries")
+        if not isinstance(items, list):
+            continue
+        entries = []
+        for item in items:
+            if isinstance(item, dict):
+                word = item.get("word") or item.get("term") or item.get("lemma") or ""
+                translation = (
+                    item.get("translation")
+                    or item.get("english")
+                    or item.get("meaning")
+                    or item.get("gloss")
+                    or ""
+                )
+                pair = _clean_vocab_pair(str(word), str(translation))
+                if pair:
+                    entries.append(pair)
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                pair = _clean_vocab_pair(str(item[0]), str(item[1]))
+                if pair:
+                    entries.append(pair)
+        if entries:
+            return entries[:5]
+    return []
+
+
+def _parse_vocab_word_blocks(text: str) -> list:
     entries = []
-    for block in text.split("---"):
+    for block in re.split(r"\n\s*---\s*\n|\n---\n", text):
         block = block.strip()
         if not block:
             continue
         word, translation = "", ""
         for line in block.splitlines():
-            if line.upper().startswith("WORD:"):
+            upper = line.strip().upper()
+            if upper.startswith("WORD:"):
                 word = line.split(":", 1)[-1].strip()
-            elif line.upper().startswith("TRANSLATION:"):
+            elif upper.startswith("TRANSLATION:") or upper.startswith("MEANING:"):
                 translation = line.split(":", 1)[-1].strip()
-        if word and translation:
-            entries.append({"word": word, "translation": translation})
+        pair = _clean_vocab_pair(word, translation)
+        if pair:
+            entries.append(pair)
     return entries[:5]
+
+
+def _parse_vocab_inline_lines(text: str) -> list:
+    """word — translation / word: translation / bullets / numbered / markdown table rows."""
+    entries = []
+    # Em dash, en dash, or hyphen separators; also colon when not a WORD: label
+    line_re = re.compile(
+        r"^\s*(?:[-*•]\s+|\d+[.)]\s+)?"  # bullet / number
+        r"[*`\"']?"
+        r"(.+?)"
+        r"[*`\"']?"
+        r"\s*(?:—|–|\s-\s|:)\s*"
+        r"[*`\"']?"
+        r"(.+?)"
+        r"[*`\"']?\s*$"
+    )
+    table_re = re.compile(
+        r"^\s*\|?\s*(.+?)\s*\|\s*(.+?)\s*\|?\s*$"
+    )
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw or raw.startswith("```"):
+            continue
+        upper = raw.upper()
+        if upper.startswith("WORD:") or upper.startswith("TRANSLATION:"):
+            continue
+        # Skip markdown separator rows like |---|---|
+        if re.match(r"^\|?\s*:?-{3,}", raw):
+            continue
+        # Skip header-ish rows
+        if re.match(r"^\|?\s*(word|term|italian|vocabulary)\s*\|", raw, re.I):
+            continue
+
+        m = line_re.match(raw)
+        if m:
+            pair = _clean_vocab_pair(m.group(1), m.group(2))
+            if pair and pair["word"].upper() not in ("WORD", "TERM"):
+                entries.append(pair)
+                continue
+
+        if "|" in raw:
+            tm = table_re.match(raw)
+            if tm:
+                left, right = tm.group(1).strip(), tm.group(2).strip()
+                if left and right and not re.match(r"^-+$", left):
+                    pair = _clean_vocab_pair(left, right)
+                    if pair and pair["word"].upper() not in ("WORD", "TERM"):
+                        entries.append(pair)
+    return entries[:5]
+
+
+def parse_vocab_response(text: str) -> list:
+    """Parse model vocab output into up to 5 {word, translation} dicts.
+
+    Accepts JSON arrays, WORD:/TRANSLATION: blocks, inline 'word — translation'
+    / 'word: translation', bullets/numbers, and simple markdown table rows.
+    Thinking leftovers are stripped first. Returns [] if nothing usable found.
+    """
+    if not text or text.startswith("ERROR:"):
+        return []
+    cleaned = _strip_thinking(text)
+    # Drop obvious preambles before structured content
+    cleaned = re.sub(r"^(?:here(?:'s| is)|sure[,!]?)[^\n]*\n+", "", cleaned, flags=re.I).strip()
+
+    for parser in (_parse_vocab_json, _parse_vocab_word_blocks, _parse_vocab_inline_lines):
+        entries = parser(cleaned)
+        if entries:
+            return entries[:5]
+    return []

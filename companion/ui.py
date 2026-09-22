@@ -36,10 +36,13 @@ from .parsing import parse_epub, parse_pdf
 from .tts import (
     _get_or_generate_audio,
     _tts_cached,
-    speak_text,
-    stop_speech,
+    maybe_continue_progressive,
+    resolve_english_voice,
     tts_button,
 )
+
+# st.fragment landed in Streamlit 1.33; use when available for snappier LL/TTS updates.
+_HAS_FRAGMENT = hasattr(st, "fragment")
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +366,51 @@ def _render_ll_vocab_table(vocab: list, book_language: str):
     )
 
 
+
+def _apply_vocab_result(cache_key: str, raw: str) -> list:
+    """Parse vocab; cache only on success. On failure store preview for UI warning."""
+    vocab = parse_vocab_response(raw)
+    if vocab:
+        st.session_state.ll_vocab = vocab
+        st.session_state.ll_vocab_cache[cache_key] = vocab
+        st.session_state.ll_vocab_parse_fail = None
+        return vocab
+    # Never cache empty list as success
+    st.session_state.ll_vocab = []
+    st.session_state.ll_vocab_cache.pop(cache_key, None)
+    preview = (raw or "").strip()
+    if len(preview) > 600:
+        preview = preview[:600] + "…"
+    st.session_state.ll_vocab_parse_fail = {"key": cache_key, "raw": preview or "(empty model output)"}
+    return []
+
+
+def _render_vocab_parse_fail(cache_key: str, book_language: str, model: str, chunk_text: str):
+    fail = st.session_state.get("ll_vocab_parse_fail") or {}
+    if fail.get("key") != cache_key:
+        return False
+    st.warning(
+        "Could not parse vocabulary from the model response. "
+        "Nothing was cached — try again (or use Prepare this section)."
+    )
+    with st.expander("Model output preview", expanded=False):
+        st.code(fail.get("raw") or "", language=None)
+    if st.button("Retry vocabulary", key="btn_ll_vocab_retry"):
+        with st.spinner(f"Extracting {book_language} vocabulary..."):
+            raw = call_ollama(
+                build_ll_vocab_prompt(chunk_text, book_language),
+                model,
+                SYSTEM_PROMPT_LL_VOCAB,
+                num_predict=512,
+            )
+            _apply_vocab_result(cache_key, raw)
+        # Fall through: successful parse shows table in same run via session state
+        if st.session_state.ll_vocab:
+            st.session_state.ll_vocab_parse_fail = None
+        st.rerun()
+    return True
+
+
 def render_language_learning_panel(model: str, tts_voice: str, tts_rate: float, tts_engine: str, book_language: str):
     chunk = st.session_state.pdf_chunks[st.session_state.current_chunk_idx]
     cache_key = _ll_ai_cache_key(model, book_language)
@@ -388,18 +436,60 @@ def render_language_learning_panel(model: str, tts_voice: str, tts_rate: float, 
         f'{_body}</div>',
         unsafe_allow_html=True,
     )
-    tts_button(f"Read aloud in {book_language}", chunk["text"], "section", tts_voice, tts_rate, tts_engine, full_width=True)
+    # Section text stays on book language + sidebar engine (XTTS/Italian as configured)
+    tts_button(
+        f"Read aloud in {book_language}",
+        chunk["text"],
+        "section",
+        tts_voice,
+        tts_rate,
+        tts_engine,
+        full_width=True,
+        progressive=True,
+    )
 
     st.markdown("---")
+    _render_ll_ai_controls(model, tts_voice, tts_rate, tts_engine, book_language, chunk, cache_key)
 
+
+def _render_ll_ai_controls(
+    model: str,
+    tts_voice: str,
+    tts_rate: float,
+    tts_engine: str,
+    book_language: str,
+    chunk: dict,
+    cache_key: str,
+):
+    """English summary + vocabulary controls (isolated for optional fragment wrapping)."""
     # Sync display fields from caches for this (pdf, section, language, model).
-    st.session_state.ll_summary = st.session_state.ll_summary_cache.get(cache_key, "")
-    st.session_state.ll_vocab = list(st.session_state.ll_vocab_cache.get(cache_key, []))
+    # Do not overwrite in-run results with empty cache after a failed parse.
+    cached_summary = st.session_state.ll_summary_cache.get(cache_key, "")
+    if cached_summary:
+        st.session_state.ll_summary = cached_summary
+    elif cache_key not in st.session_state.ll_summary_cache:
+        # Navigating to a section with no cache — clear stale display
+        if not st.session_state.ll_summary or st.session_state.get("_ll_summary_key") != cache_key:
+            st.session_state.ll_summary = ""
+    st.session_state._ll_summary_key = cache_key
+
+    cached_vocab = st.session_state.ll_vocab_cache.get(cache_key)
+    if cached_vocab:
+        st.session_state.ll_vocab = list(cached_vocab)
+    else:
+        # Keep in-run vocab if we just generated it; otherwise clear for this key
+        if st.session_state.get("_ll_vocab_key") != cache_key:
+            st.session_state.ll_vocab = []
+    st.session_state._ll_vocab_key = cache_key
 
     prepare_col, _ = st.columns([1, 1])
     with prepare_col:
-        if st.button("Prepare this section", key="btn_ll_prepare", use_container_width=True,
-                     help="Generate English summary and vocabulary in parallel."):
+        if st.button(
+            "Prepare this section",
+            key="btn_ll_prepare",
+            use_container_width=True,
+            help="Generate English summary and vocabulary in parallel.",
+        ):
             with st.spinner("Preparing summary and vocabulary…"):
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     fut_sum = pool.submit(
@@ -420,9 +510,9 @@ def render_language_learning_panel(model: str, tts_voice: str, tts_rate: float, 
                     raw_vocab = fut_vocab.result()
                 st.session_state.ll_summary = summary
                 st.session_state.ll_summary_cache[cache_key] = summary
-                vocab = parse_vocab_response(raw_vocab)
-                st.session_state.ll_vocab = vocab
-                st.session_state.ll_vocab_cache[cache_key] = vocab
+                _apply_vocab_result(cache_key, raw_vocab)
+            # Prefer showing results in the same run (state already set); soft rerun
+            # only if we need widgets to flip from button → content cleanly.
             st.rerun()
 
     st.markdown("**English Summary**")
@@ -441,12 +531,48 @@ def render_language_learning_panel(model: str, tts_voice: str, tts_rate: float, 
             st.rerun()
     else:
         _render_ll_summary_body(st.session_state.ll_summary)
-        tts_button("Read summary", st.session_state.ll_summary, "ll_summary", tts_voice, tts_rate, tts_engine)
+        # English summary must not use Italian XTTS — auto-route to English voice
+        eng_engine, eng_voice, _ = resolve_english_voice(tts_engine, tts_voice)
+        voice_note = None
+        engine_override = None
+        voice_override = None
+        if eng_engine != tts_engine or eng_voice != tts_voice:
+            engine_override = eng_engine
+            voice_override = eng_voice
+            voice_note = f"Summary uses English voice ({eng_engine})"
+            st.caption(voice_note)
+        tts_button(
+            "Read summary",
+            st.session_state.ll_summary,
+            "ll_summary",
+            tts_voice,
+            tts_rate,
+            tts_engine,
+            engine_override=engine_override,
+            voice_override=voice_override,
+            voice_note=voice_note,
+            progressive=True,
+        )
 
     st.markdown("---")
 
     st.markdown("**Vocabulary**")
-    if not st.session_state.ll_vocab:
+    if st.session_state.ll_vocab:
+        _render_ll_vocab_table(st.session_state.ll_vocab, book_language)
+        st.caption("Words use book-language voice; translations use English (Edge).")
+        tts_button(
+            "Read vocabulary",
+            "",  # unused when bilingual_vocab set
+            "ll_vocab",
+            tts_voice,
+            tts_rate,
+            tts_engine,
+            bilingual_vocab=st.session_state.ll_vocab,
+            voice_note="Vocabulary: book-language words + English translations",
+        )
+    elif _render_vocab_parse_fail(cache_key, book_language, model, chunk["text"]):
+        pass  # warning + retry already rendered
+    else:
         st.caption(f"Pick useful {book_language} words from this section when you're ready.")
         if st.button("Vocabulary", key="btn_ll_vocab"):
             with st.spinner(f"Extracting {book_language} vocabulary..."):
@@ -456,14 +582,29 @@ def render_language_learning_panel(model: str, tts_voice: str, tts_rate: float, 
                     SYSTEM_PROMPT_LL_VOCAB,
                     num_predict=512,
                 )
-                vocab = parse_vocab_response(raw)
-                st.session_state.ll_vocab = vocab
-                st.session_state.ll_vocab_cache[cache_key] = vocab
-            st.rerun()
-    else:
-        _render_ll_vocab_table(st.session_state.ll_vocab, book_language)
-        vocab_tts_text = ". ".join(f'{v["word"]}: {v["translation"]}' for v in st.session_state.ll_vocab)
-        tts_button("Read vocabulary", vocab_tts_text, "ll_vocab", tts_voice, tts_rate, tts_engine)
+                vocab = _apply_vocab_result(cache_key, raw)
+            if vocab:
+                # Show table in the same run — avoid rerun-with-empty-cache flicker
+                _render_ll_vocab_table(vocab, book_language)
+                st.caption("Words use book-language voice; translations use English (Edge).")
+                tts_button(
+                    "Read vocabulary",
+                    "",
+                    "ll_vocab",
+                    tts_voice,
+                    tts_rate,
+                    tts_engine,
+                    bilingual_vocab=vocab,
+                    voice_note="Vocabulary: book-language words + English translations",
+                )
+            else:
+                _render_vocab_parse_fail(cache_key, book_language, model, chunk["text"])
+
+
+# Wrap LL AI controls in a fragment when Streamlit supports it (isolates reruns).
+if _HAS_FRAGMENT:
+    _render_ll_ai_controls = st.fragment(_render_ll_ai_controls)
+
 
 
 def render_sidebar():
@@ -499,6 +640,7 @@ def render_sidebar():
                 st.session_state.question_cache = {}
                 st.session_state.ll_summary = ""
                 st.session_state.ll_vocab = []
+                st.session_state.ll_vocab_parse_fail = None
                 st.session_state.ll_summary_cache = {}
                 st.session_state.ll_vocab_cache = {}
                 st.success(f"Loaded {len(chunks)} sections from '{uploaded_file.name}'")
@@ -552,6 +694,7 @@ def render_sidebar():
                 st.session_state.ll_book_language = ll_lang_label
                 st.session_state.ll_summary = ""
                 st.session_state.ll_vocab = []
+                st.session_state.ll_vocab_parse_fail = None
                 st.session_state["xtts_lang_select"] = ll_lang_label
 
         # Prefer XTTS when entering Language Learning with a non-English book language.
@@ -794,20 +937,8 @@ def render_app():
     # ------------------------------------------------------------------
     st.markdown(render_ambient_bg_html(scrim_opacity=0.5, glass_ui=True), unsafe_allow_html=True)
 
-    if st.session_state.tts_error:
-        st.error(st.session_state.tts_error)
-        if st.button("Dismiss error", key="btn_dismiss_tts_error"):
-            st.session_state.tts_error = ""
-            st.rerun()
-
-    if st.session_state.tts_audio:
-        col_audio, col_stop = st.columns([5, 1])
-        with col_audio:
-            st.audio(st.session_state.tts_audio, format=st.session_state.tts_format, autoplay=True)
-        with col_stop:
-            if st.button("Stop", key="btn_stop"):
-                stop_speech()
-                st.rerun()
+    # Progressive TTS player (fragment continues generating remaining segments).
+    maybe_continue_progressive()
 
     # Two-column layout: reading panel (left, wider) + chat panel (right).
     # Change the ratio [3, 2] to shift space between columns, e.g.:

@@ -1,6 +1,9 @@
 import copy
 
 MAX_CHUNK_CHARS = 5000
+MAX_VOCAB_PASSAGE_CHARS = 1800  # shorter passage → better vocab format adherence
+TTS_CACHE_MAX_ENTRIES = 40
+TTS_PROGRESSIVE_MIN_SEGMENTS = 2  # use progressive path when split yields this many+
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 
@@ -34,8 +37,10 @@ SYSTEM_PROMPT_LL_VOCAB = (
     "You are a vocabulary tutor. When given a passage in a foreign language, "
     "select exactly 5 words or short phrases that are useful to learn. "
     "Avoid very common words (articles, basic prepositions). "
-    "For each entry use EXACTLY this format on separate lines:\n"
-    "WORD: <word>\nTRANSLATION: <English meaning>\n---"
+    "Respond with ONLY a JSON array of exactly 5 objects, each with keys "
+    '"word" and "translation". Example: '
+    '[{"word":"casa","translation":"house"},{"word":"andare","translation":"to go"}]. '
+    "No markdown fences, no commentary, no thinking tags — JSON array only."
 )
 
 # Soft preference order for the model selectbox when those models are installed.
@@ -68,6 +73,14 @@ DEFAULTS = {
     "tts_source": "",
     "tts_cache": {},
     "tts_error": "",
+    # Progressive / playlist TTS
+    "tts_segments": [],
+    "tts_segment_audios": [],
+    "tts_segments_done": 0,
+    "tts_progressive_active": False,
+    "tts_progressive_meta": {},
+    "tts_progressive_just_added": -1,
+    "tts_voice_note": "",
     "audiobook_bytes": b"",
     "audiobook_ext": "wav",
     "xtts_speaker_wav": b"",
@@ -80,6 +93,7 @@ DEFAULTS = {
     "ll_book_language": "Italian",
     "ll_summary": "",
     "ll_vocab": [],
+    "ll_vocab_parse_fail": None,  # {"key": cache_key, "raw": preview} on parse failure
     # Per-section LL caches keyed by "pdf_name|chunk_idx|language|model"
     "ll_summary_cache": {},
     "ll_vocab_cache": {},
