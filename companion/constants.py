@@ -176,8 +176,9 @@ XTTS_LANGUAGES = {
     "Hungarian": "hu",
 }
 
-# Facebook MMS-TTS Italian (VITS). Single dedicated voice; no speaker cloning.
-MMS_ITALIAN_VOICES = {
-    "MMS Italian (ita)": "ita",
+# Piper Italian (rhasspy/piper-voices). Dedicated local Italian voice; no speaker cloning.
+# Model files auto-download to .cache/piper/ on first use (~60 MB).
+PIPER_ITALIAN_VOICES = {
+    "Paola (it_IT medium)": "it_IT-paola-medium",
 }
 

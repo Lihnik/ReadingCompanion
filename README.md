@@ -9,10 +9,11 @@ An AI-powered reading companion that lets you upload a PDF or EPUB and read it s
 - **Comprehension questions** — on-demand question per section with answer submission and AI feedback; cached per section
 - **Section summarizer** — on-demand bullet-point summary
 - **Chat** — streaming conversation grounded in the current section; last 6 messages kept as context
-- **Text-to-speech** — three engines:
+- **Text-to-speech** — four engines:
   - **Edge TTS** (internet required) — 6 voices across US/UK/AU English, MP3 output
   - **Kokoro-82M** (fully local) — 9 neural voices, WAV output, ~115 MB model downloaded once; runs on GPU if CUDA is available
   - **XTTS** (fully local, voice cloning) — Estonian, Finnish, and 16 other languages; upload any 6+ second WAV to clone that voice; ~5.8 GB model downloaded once; GPU accelerated
+  - **Piper Italian** (fully local) — dedicated Paola voice (`it_IT-paola-medium` via `piper-tts`); first run downloads ~60 MB. Replaces the non-existent `facebook/mms-tts-ita` (Italian has MMS ASR only, not TTS).
 - **Audiobook generator** — render a selectable range of sections to a single WAV/MP3 file and download it; useful for skipping front/back matter
 - **Multi-column PDF support** — detects two-column layouts and reads left column before right
 - **Reasoning model support** — `<think>` blocks from models like Qwen3 and DeepSeek-R1 are silently stripped; token budgets sized accordingly
@@ -40,6 +41,7 @@ An AI-powered reading companion that lets you upload a PDF or EPUB and read it s
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# Optional Piper Italian: pip install ".[piper]"  # or: pip install piper-tts onnxruntime
 
 # Create a venv (Windows PowerShell / cmd)
 py -3.12 -m venv .venv
@@ -146,3 +148,12 @@ Pull each with `ollama pull <name>` first.
 **XTTS** ([tartuNLP/XTTS-v2-multi](https://huggingface.co/tartuNLP/XTTS-v2-multi), local, voice cloning)
 
 Voice is determined by a reference WAV file you upload — any 6+ second clean speech recording works. Supported languages: Estonian, Finnish, English, German, French, Spanish, Russian, Polish, Dutch, Italian, Portuguese, Czech, Turkish, Arabic, Chinese, Japanese, Korean, Hungarian.
+
+**Piper Italian** ([rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices), local)
+
+| Voice | Id |
+|-------|-----|
+| Paola (it_IT medium) | `it_IT-paola-medium` |
+
+Install: `pip install piper-tts onnxruntime` (or `pip install ".[piper]"`). First synthesis downloads ~60 MB into `.cache/piper/`. Note: `facebook/mms-tts-ita` does not exist on Hugging Face — Italian has MMS ASR only.
+

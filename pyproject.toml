@@ -27,11 +27,9 @@ xtts = [
     "huggingface_hub",
     "transformers>=4.33.0,<5.0",
 ]
-mms = [
-    "transformers>=4.33.0,<5.0",
-    "torch",
-    "torchaudio",
-    "soundfile",
+piper = [
+    "piper-tts",
+    "onnxruntime",
 ]
 
 [tool.setuptools.packages.find]

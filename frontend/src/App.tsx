@@ -40,7 +40,7 @@ const LANGS = [
   'Hungarian',
 ];
 
-const ENGINES = ['Edge TTS', 'Kokoro', 'XTTS', 'MMS Italian'] as const;
+const ENGINES = ['Edge TTS', 'Kokoro', 'XTTS', 'Piper Italian'] as const;
 type AppMode = 'language_learning' | 'reading';
 
 export default function App() {
@@ -55,8 +55,8 @@ export default function App() {
     edge: Record<string, string>;
     kokoro: Record<string, string>;
     xtts_languages: Record<string, string>;
-    mms_italian?: Record<string, string>;
-    mms_available?: boolean;
+    piper_italian?: Record<string, string>;
+    piper_italian_available?: boolean;
   } | null>(null);
   const [voice, setVoice] = useState('Aria (US, Female)');
   const [speakerKey, setSpeakerKey] = useState<string | null>(null);
@@ -107,8 +107,8 @@ export default function App() {
     } else if (engine === 'Kokoro') {
       const keys = Object.keys(voices.kokoro);
       if (keys.length) setVoice(keys[0]);
-    } else if (engine === 'MMS Italian') {
-      const keys = Object.keys(voices.mms_italian || { 'MMS Italian (ita)': 'ita' });
+    } else if (engine === 'Piper Italian') {
+      const keys = Object.keys(voices.piper_italian || { 'Paola (it_IT medium)': 'it_IT-paola-medium' });
       if (keys.length) setVoice(keys[0]);
     } else {
       setVoice(language in voices.xtts_languages ? language : 'Italian');
@@ -278,8 +278,8 @@ export default function App() {
     if (!voices) return [] as string[];
     if (engine === 'Edge TTS') return Object.keys(voices.edge);
     if (engine === 'Kokoro') return Object.keys(voices.kokoro);
-    if (engine === 'MMS Italian') {
-      return Object.keys(voices.mms_italian || { 'MMS Italian (ita)': 'ita' });
+    if (engine === 'Piper Italian') {
+      return Object.keys(voices.piper_italian || { 'Paola (it_IT medium)': 'it_IT-paola-medium' });
     }
     return Object.keys(voices.xtts_languages);
   }, [engine, voices]);
@@ -392,15 +392,18 @@ export default function App() {
           </label>
         )}
 
-        {engine === 'MMS Italian' && (
+                {engine === 'Piper Italian' && (
           <div className="muted" style={{ marginTop: '-0.35rem', marginBottom: '0.75rem' }}>
-            Dedicated Italian (facebook/mms-tts-ita)
-            {voices && voices.mms_available === false && (
+            Dedicated Italian Piper voice: Paola (it_IT medium)
+            {voices && voices.piper_italian_available === false && (
               <div style={{ color: '#fbbf24', marginTop: '0.35rem' }}>
-                MMS deps missing — install <code>pip install &quot;.[mms]&quot;</code> then restart
-                uvicorn. Word ▶ falls back to Edge until then.
+                Piper deps missing — install <code>pip install &quot;.[piper]&quot;</code> (or{' '}
+                <code>piper-tts onnxruntime</code>) then restart uvicorn. Word ▶ falls back to Edge
+                until then.
               </div>
             )}
+          </div>
+        )}
           </div>
         )}
 

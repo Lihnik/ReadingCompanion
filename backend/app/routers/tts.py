@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from companion.constants import EDGE_LANG_VOICES, EDGE_VOICES, KOKORO_VOICES, MMS_ITALIAN_VOICES, XTTS_LANGUAGES
+from companion.constants import EDGE_LANG_VOICES, EDGE_VOICES, KOKORO_VOICES, PIPER_ITALIAN_VOICES, XTTS_LANGUAGES
 from companion.tts import (
     _engine_key,
     _generate_one,
@@ -19,7 +19,7 @@ from companion.tts import (
     edge_voice_for_language,
     estimate_audio_seconds,
     generate_vocab_word_audio,
-    mms_italian_available,
+    piper_italian_available,
     split_for_tts,
 )
 
@@ -31,7 +31,7 @@ router = APIRouter()
 class SectionStartRequest(BaseModel):
     book_id: str
     section_idx: int
-    engine: str = "Edge TTS"  # Edge TTS | Kokoro | XTTS | MMS Italian
+    engine: str = "Edge TTS"  # Edge TTS | Kokoro | XTTS | Piper Italian
     voice: str = "Aria (US, Female)"
     rate: float = 1.0
     speaker_key: Optional[str] = None
@@ -60,7 +60,7 @@ class WordRequest(BaseModel):
     rate: float = 1.0
     speaker_key: Optional[str] = None
     xtts_lang: Optional[str] = None
-    engine: Optional[str] = None  # when MMS Italian, word ▶ uses MMS too
+    engine: Optional[str] = None  # when Piper Italian, word ▶ uses Piper too
 
 
 class AudiobookStartRequest(BaseModel):
@@ -80,8 +80,8 @@ def _resolve_voice_id(engine: str, voice_label: str) -> tuple[str, str]:
         return ek, EDGE_VOICES.get(voice_label, voice_label)
     if ek == "kokoro":
         return ek, KOKORO_VOICES.get(voice_label, voice_label)
-    if ek == "mms_italian":
-        return ek, MMS_ITALIAN_VOICES.get(voice_label, voice_label or "ita")
+    if ek == "piper_italian":
+        return ek, PIPER_ITALIAN_VOICES.get(voice_label, voice_label or "it_IT-paola-medium")
     if voice_label in XTTS_LANGUAGES:
         return ek, XTTS_LANGUAGES[voice_label]
     if voice_label in XTTS_LANGUAGES.values():
@@ -315,16 +315,16 @@ def pronounce_word(body: WordRequest):
     if not result:
         edge = edge_voice_for_language(body.language)
         pref = (body.engine or "").strip()
-        if pref in ("MMS Italian", "mms_italian") and not mms_italian_available():
+        if pref in ("Piper Italian", "piper_italian") and not piper_italian_available():
             hint = (
-                'MMS Italian failed: dependencies missing. '
-                'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio), '
+                'Piper Italian failed: dependencies missing. '
+                'Install: pip install ".[piper]" (or: pip install piper-tts onnxruntime), '
                 "then restart uvicorn. Word ▶ also falls back to Edge when Edge is available."
             )
         elif not edge:
             hint = "No Edge voice for this language and no speaker WAV for XTTS fallback."
         else:
-            hint = "Generation failed (MMS/Edge/XTTS all unavailable for this word)."
+            hint = "Generation failed (Piper/Edge/XTTS all unavailable for this word)."
         raise HTTPException(502, hint)
 
     audio, mime = result
@@ -476,9 +476,9 @@ def list_voices():
         "edge": EDGE_VOICES,
         "kokoro": KOKORO_VOICES,
         "xtts_languages": XTTS_LANGUAGES,
-        "mms_italian": MMS_ITALIAN_VOICES,
+        "piper_italian": PIPER_ITALIAN_VOICES,
         "edge_lang_voices": dict(EDGE_LANG_VOICES),
-        "mms_available": mms_italian_available(),
+        "piper_italian_available": piper_italian_available(),
     }
 
 
@@ -486,7 +486,7 @@ def list_voices():
 def list_engines():
     """Engine availability hints for the UI (deps may still need a model download)."""
     return {
-        "engines": ["Edge TTS", "Kokoro", "XTTS", "MMS Italian"],
-        "mms_available": mms_italian_available(),
-        "mms_install": 'pip install ".[mms]"',
+        "engines": ["Edge TTS", "Kokoro", "XTTS", "Piper Italian"],
+        "piper_italian_available": piper_italian_available(),
+        "piper_install": 'pip install ".[piper]"',
     }

@@ -8,7 +8,7 @@ Additive React rewrite of the Streamlit app. The classic Streamlit entrypoint (`
 /backend          FastAPI app (uvicorn)
   app/main.py
   app/routers/    books, ai, tts, ollama
-/companion/       Shared engines (PDF/EPUB, Ollama, Edge/Kokoro/XTTS/MMS Italian)
+/companion/       Shared engines (PDF/EPUB, Ollama, Edge/Kokoro/XTTS/Piper Italian)
 /frontend         Vite + React + TypeScript
 ```
 
@@ -19,7 +19,7 @@ Repo root is added to `PYTHONPATH` so FastAPI can `import companion…`.
 - Python **3.10–3.12** preferred (Kokoro needs `<3.13`); 3.13 works for Edge TTS + API smoke tests
 - Node.js 18+ (for Vite)
 - [Ollama](https://ollama.com/) for AI (`ollama serve`, then `ollama pull llama3.1:8b`)
-- Optional: espeak-ng (Kokoro), ffmpeg (Edge concat / mic convert), coqui-tts (XTTS), transformers+torch (MMS Italian), pydub (Edge MP3 concat for audiobook)
+- Optional: espeak-ng (Kokoro), ffmpeg (Edge concat / mic convert), coqui-tts (XTTS), piper-tts + onnxruntime (Piper Italian), pydub (Edge MP3 concat for audiobook)
 
 ## Setup
 
@@ -31,9 +31,10 @@ python3.12 -m venv .venv          # or python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-api.txt
 # Optional XTTS: pip install ".[xtts]"
-# Optional MMS Italian TTS: pip install ".[mms]"
-#   (or: pip install transformers torch torchaudio)
-#   First run downloads facebook/mms-tts-ita from Hugging Face (~hundreds of MB).
+# Optional Piper Italian TTS: pip install ".[piper]"
+#   (or: pip install piper-tts onnxruntime)
+#   First run downloads it_IT-paola-medium (~60 MB) into .cache/piper/.
+#   Note: facebook/mms-tts-ita does not exist on Hugging Face (Italian has MMS ASR only).
 ```
 
 ### Backend (Windows PowerShell)
@@ -87,35 +88,38 @@ python -m streamlit run reading_companion.py
 
 ## Features
 
-### MMS Italian TTS
+### Piper Italian TTS
 
-Dedicated Italian voice via Hugging Face `facebook/mms-tts-ita` (VITS / `transformers.VitsModel`).
+Dedicated local Italian voice via **Piper** (`piper-tts`) and the Rhasspy voice `it_IT-paola-medium` (Paola).
+
+> **Why not MMS?** `facebook/mms-tts-ita` does **not** exist on Hugging Face. Meta’s MMS project ships Italian **ASR**, not TTS ([HF forum](https://discuss.huggingface.co/t/why-is-mms-tts-ita-model-not-available/139990)). Piper Paola is the dedicated Italian engine used here instead.
 
 ```bash
-pip install transformers torch torchaudio
-# or: pip install ".[mms]"
+pip install piper-tts onnxruntime
+# or: pip install ".[piper]"
 ```
 
 Then **restart uvicorn** so the API process picks up the new packages.
 
-- Select **MMS Italian** in the sidebar TTS engine list (no speaker WAV).
-- First run downloads the model from Hugging Face and caches it locally.
-- Speed slider uses approximate resampling (no native rate; pitch shifts with speed).
-- `GET /api/tts/voices` includes `mms_available: bool` so the UI can hint when deps are missing.
-- Vocab word ▶ prefers MMS when that engine is selected, then **falls back to Edge** if MMS fails.
+- Select **Piper Italian** in the sidebar TTS engine list (voice: **Paola (it_IT medium)**; no speaker WAV).
+- First synthesis downloads the ONNX + JSON (~60 MB) into repo `.cache/piper/`.
+- Speed slider maps to Piper `length_scale` (native; no crude resample).
+- Long phrases are chunked (~280 chars) because Paola can glitch on very long unbroken text.
+- `GET /api/tts/voices` includes `piper_italian_available: bool` so the UI can hint when deps are missing.
+- Vocab word ▶ prefers Piper when that engine is selected, then **falls back to Edge** if Piper fails.
 
 ### Troubleshooting
 
 **Word ▶ returns HTTP 502**
 
-- If the JSON `detail` mentions `No module named 'transformers'` (or torch), install MMS deps and restart:
+- If the JSON `detail` mentions `No module named 'piper'` (or onnxruntime), install Piper deps and restart:
 
   ```bash
-  pip install ".[mms]"
+  pip install ".[piper]"
   # restart: PYTHONPATH=. uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
   ```
 
-- With MMS still broken, word ▶ should still play via **Edge** for languages that have an Edge voice (e.g. Italian). Section read-aloud with MMS Italian surfaces the real error on the progressive job (`seg.error`) instead of silent failure.
+- With Piper still unavailable, word ▶ should still play via **Edge** for languages that have an Edge voice (e.g. Italian). Section read-aloud with Piper Italian surfaces the real error on the progressive job (`seg.error`) instead of silent failure.
 
 **Backend logs `missing ScriptRunContext!`**
 
@@ -129,7 +133,7 @@ Then **restart uvicorn** so the API process picks up the new packages.
 ### Shared
 
 - Streaming **chat** (SSE) grounded in the current section; “Read last response” via progressive TTS
-- Sidebar: Ollama model picker, TTS engine (Edge / Kokoro / XTTS / MMS Italian), voice/lang, rate, XTTS speaker WAV, book language (LL)
+- Sidebar: Ollama model picker, TTS engine (Edge / Kokoro / XTTS / Piper Italian), voice/lang, rate, XTTS speaker WAV, book language (LL)
 - Prev / Next + jump-to-section; **Stop** TTS
 - **Audiobook export** — section range → background job → download link
 - Two-column desktop layout: reading/LL left, chat (+ LL cards) right
@@ -141,7 +145,7 @@ Then **restart uvicorn** so the API process picks up the new packages.
 3. **LL mode** — Prepare / summary / vocab ▶ / Read aloud with rate change; Stop clears playback.
 4. **Audiobook** — pick start/end indices, Generate, wait for download link (Edge/Kokoro first; XTTS needs speaker WAV).
 5. **XTTS** — upload speaker WAV, select XTTS + language, Read aloud / audiobook.
-6. **MMS Italian** — select engine “MMS Italian” (no speaker upload). First synthesis downloads `facebook/mms-tts-ita`. Rate uses simple resampling (pitch shifts). Word ▶ uses MMS when this engine is selected.
+6. **Piper Italian** — select engine “Piper Italian” / voice “Paola (it_IT medium)” (no speaker upload). First synthesis downloads ~60 MB ONNX. Word ▶ uses Piper when this engine is selected.
 
 ## API sketch
 
@@ -170,8 +174,8 @@ Then **restart uvicorn** so the API process picks up the new packages.
 | GET | `/api/tts/audiobook/{id}` | status |
 | GET | `/api/tts/audiobook/{id}/download` | file |
 | POST | `/api/tts/audiobook/{id}/stop` | cancel |
-| GET | `/api/tts/voices` | Edge / Kokoro / XTTS / MMS maps + `mms_available` |
-| GET | `/api/tts/engines` | Engine list + MMS install hint |
+| GET | `/api/tts/voices` | Edge / Kokoro / XTTS / Piper maps + `piper_italian_available` |
+| GET | `/api/tts/engines` | Engine list + Piper install hint |
 
 ## Known gaps
 

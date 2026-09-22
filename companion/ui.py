@@ -8,7 +8,7 @@ import streamlit as st
 from .constants import (
     EDGE_VOICES,
     KOKORO_VOICES,
-    MMS_ITALIAN_VOICES,
+    PIPER_ITALIAN_VOICES,
     XTTS_LANGUAGES,
     PREFERRED_OLLAMA_MODELS,
     SYSTEM_PROMPT_COMMENTARY,
@@ -277,8 +277,8 @@ def render_audiobook_panel(tts_voice: str, tts_rate: float, tts_engine: str):
         engine_key = "kokoro"
     elif tts_engine == "XTTS":
         engine_key = "xtts"
-    elif tts_engine == "MMS Italian":
-        engine_key = "mms_italian"
+    elif tts_engine == "Piper Italian":
+        engine_key = "piper_italian"
     else:
         engine_key = "edge"
 
@@ -310,7 +310,7 @@ def render_audiobook_panel(tts_voice: str, tts_rate: float, tts_engine: str):
             audio_parts.append(_get_or_generate_audio(chunk["text"], tts_voice, tts_rate, engine_key))
         progress.progress(1.0, text="Combining sections…")
 
-        if engine_key in ("kokoro", "xtts", "mms_italian"):
+        if engine_key in ("kokoro", "xtts", "piper_italian"):
             import numpy as np
             import soundfile as sf
             arrays = []
@@ -484,7 +484,7 @@ def render_language_learning_panel(model: str, tts_voice: str, tts_rate: float, 
     if tts_engine != "XTTS" and book_language != "English":
         st.info(
             f"Tip: Edge TTS and Kokoro are English-only — they can't read {book_language} well. "
-            f"Switch to XTTS (or MMS Italian for Italian) to hear this section aloud."
+            f"Switch to XTTS (or Piper Italian for Italian) to hear this section aloud."
         )
 
     _paras = [p.strip() for p in chunk["text"].split("\n\n") if p.strip()] or [chunk["text"]]
@@ -787,13 +787,13 @@ def render_sidebar():
             else:
                 st.session_state.tts_engine_choice = "Edge TTS"
         tts_engine = st.radio(
-            "Engine", ["Edge TTS", "Kokoro", "XTTS", "MMS Italian"], horizontal=True,
+            "Engine", ["Edge TTS", "Kokoro", "XTTS", "Piper Italian"], horizontal=True,
             key="tts_engine_choice",
             help=(
                 "Edge TTS requires internet. "
                 "Kokoro runs fully locally (~115 MB, English only). "
                 "XTTS supports Estonian and 17 other languages via voice cloning (~5.8 GB, downloaded once). "
-                "MMS Italian is a dedicated Italian VITS model (facebook/mms-tts-ita; no speaker cloning)."
+                "Piper Italian uses the local Paola voice (it_IT-paola-medium via piper-tts; no speaker cloning)."
             ),
         )
         if tts_engine == "Edge TTS":
@@ -804,7 +804,7 @@ def render_sidebar():
                 and st.session_state.ll_book_language != "English"
             ):
                 st.caption(
-                    f"Edge TTS can't do {st.session_state.ll_book_language} — switch to XTTS or MMS Italian."
+                    f"Edge TTS can't do {st.session_state.ll_book_language} — switch to XTTS or Piper Italian."
                 )
         elif tts_engine == "Kokoro":
             tts_voice_label = st.selectbox("Voice", list(KOKORO_VOICES.keys()))
@@ -814,12 +814,12 @@ def render_sidebar():
                 and st.session_state.ll_book_language != "English"
             ):
                 st.caption(
-                    f"Kokoro is English-only — switch to XTTS or MMS Italian for {st.session_state.ll_book_language}."
+                    f"Kokoro is English-only — switch to XTTS or Piper Italian for {st.session_state.ll_book_language}."
                 )
-        elif tts_engine == "MMS Italian":
-            tts_voice_label = st.selectbox("Voice", list(MMS_ITALIAN_VOICES.keys()))
-            tts_voice = MMS_ITALIAN_VOICES[tts_voice_label]
-            st.caption("Dedicated Italian (facebook/mms-tts-ita). First run downloads the model from Hugging Face.")
+        elif tts_engine == "Piper Italian":
+            tts_voice_label = st.selectbox("Voice", list(PIPER_ITALIAN_VOICES.keys()))
+            tts_voice = PIPER_ITALIAN_VOICES[tts_voice_label]
+            st.caption("Dedicated Italian Piper voice: Paola (it_IT medium). First run downloads ~60 MB ONNX from Hugging Face.")
         else:  # XTTS
             lang_keys = list(XTTS_LANGUAGES.keys())
             if st.session_state.app_mode == "language_learning":

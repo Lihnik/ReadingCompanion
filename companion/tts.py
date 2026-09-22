@@ -136,38 +136,36 @@ def get_vocab_audio_cached(word: str, book_language: str, tts_rate: float = 1.0)
     return None
 
 
-def _format_mms_failure(exc: BaseException) -> str:
-    """User-facing detail when MMS Italian cannot synthesize."""
+def _format_piper_italian_failure(exc: BaseException) -> str:
+    """User-facing detail when Piper Italian cannot synthesize."""
     base = str(exc).strip() or exc.__class__.__name__
     low = base.lower()
-    # _load_mms_italian already returns a clear "MMS Italian dependencies…" message.
-    if low.startswith("mms italian"):
+    if low.startswith("piper italian"):
         if "pip install" not in low:
             return (
                 f"{base} "
-                'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio)'
+                'Install: pip install ".[piper]" (or: pip install piper-tts onnxruntime)'
             )
         return base
     if (
         "not installed" in low
         or "no module named" in low
-        or "transformers" in low
-        or "torch" in low
+        or "piper" in low
+        or "onnxruntime" in low
     ):
         if "pip install" not in low:
             return (
-                f"MMS Italian failed: {base}. "
-                'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio)'
+                f"Piper Italian failed: {base}. "
+                'Install: pip install ".[piper]" (or: pip install piper-tts onnxruntime)'
             )
-        return f"MMS Italian failed: {base}"
-    return f"MMS Italian failed: {base}"
+        return f"Piper Italian failed: {base}"
+    return f"Piper Italian failed: {base}"
 
 
-def mms_italian_available() -> bool:
-    """True when transformers + torch import successfully (model download may still be needed)."""
+def piper_italian_available() -> bool:
+    """True when the piper package imports (voice files may still need download)."""
     try:
-        import torch  # noqa: F401
-        from transformers import AutoTokenizer, VitsModel  # noqa: F401
+        from piper import PiperVoice  # noqa: F401
         return True
     except Exception:
         return False
@@ -184,9 +182,9 @@ def generate_vocab_word_audio(
     """Generate one vocab word clip and cache it. Does NOT touch progressive player state.
 
     Pass speaker_wav_bytes explicitly for non-Streamlit callers (FastAPI).
-    If preferred_engine is MMS Italian (label or key), try MMS first for consistency with
-    section TTS; on failure fall through to Edge (then XTTS). If MMS was preferred and
-    every engine fails, re-raise a RuntimeError with the MMS detail for API 502 messages.
+    If preferred_engine is Piper Italian (label or key), try Piper first for consistency with
+    section TTS; on failure fall through to Edge (then XTTS). If Piper was preferred and
+    every engine fails, re-raise a RuntimeError with the Piper detail for API 502 messages.
     """
     word = (word or "").strip()
     if not word:
@@ -194,26 +192,26 @@ def generate_vocab_word_audio(
     vocab_cache = _vocab_audio_cache_dict()
     audio_cache = _audio_cache_dict()
 
-    mms_error: Exception | None = None
+    piper_error: Exception | None = None
     pref = (preferred_engine or "").strip()
-    pref_key = _engine_key(pref) if pref in ("Edge TTS", "Kokoro", "XTTS", "MMS Italian") else pref
-    if pref_key == "mms_italian" or pref == "mms_italian":
-        vkey = _vocab_cache_key(word, book_language, "mms_italian:ita")
+    pref_key = _engine_key(pref) if pref in ("Edge TTS", "Kokoro", "XTTS", "Piper Italian") else pref
+    if pref_key == "piper_italian" or pref == "piper_italian":
+        vkey = _vocab_cache_key(word, book_language, "piper_italian:paola")
         hit = vocab_cache.get(vkey)
         if hit:
             return hit
-        cache_key = _make_tts_cache_key(word, "ita", tts_rate, "mms_italian")
+        cache_key = _make_tts_cache_key(word, "it_IT-paola-medium", tts_rate, "piper_italian")
         try:
             if cache_key in audio_cache:
                 audio_bytes, fmt = audio_cache[cache_key]
             else:
-                audio_bytes = _speak_mms_italian(word, tts_rate)
+                audio_bytes = _speak_piper_italian(word, tts_rate)
                 fmt = "audio/wav"
                 _cache_put(cache_key, audio_bytes, fmt)
             vocab_cache[vkey] = (audio_bytes, fmt)
             return audio_bytes, fmt
         except Exception as e:
-            mms_error = e
+            piper_error = e
             # Fall through to Edge / XTTS rather than returning None immediately.
 
     edge_voice = edge_voice_for_language(book_language)
@@ -242,8 +240,8 @@ def generate_vocab_word_audio(
         if st_mod is not None:
             spk = st_mod.session_state.get("xtts_speaker_wav") or b""
     if not spk:
-        if mms_error is not None:
-            raise RuntimeError(_format_mms_failure(mms_error)) from mms_error
+        if piper_error is not None:
+            raise RuntimeError(_format_piper_italian_failure(piper_error)) from piper_error
         return None
     prompt = word.rstrip(".!?…") + "."
     vkey = _vocab_cache_key(word, book_language, f"xtts:{lang}")
@@ -267,8 +265,8 @@ def generate_vocab_word_audio(
         vocab_cache[vkey] = (audio_bytes, fmt)
         return audio_bytes, fmt
     except Exception:
-        if mms_error is not None:
-            raise RuntimeError(_format_mms_failure(mms_error)) from mms_error
+        if piper_error is not None:
+            raise RuntimeError(_format_piper_italian_failure(piper_error)) from piper_error
         return None
 
 
@@ -454,77 +452,123 @@ def _speak_kokoro(text: str, voice: str, speed: float) -> bytes:
 
 
 
-def _approx_speed_change(audio, rate: float):
-    """Approximate playback speed via linear resample (also shifts pitch).
-
-    MMS-TTS has no native speed control. rate>1 → faster (fewer samples at same SR).
-    """
-    import numpy as np
-
-    if audio is None or len(audio) == 0:
-        return audio
-    if rate is None or abs(float(rate) - 1.0) < 1e-3 or float(rate) <= 0:
-        return audio
-    rate = float(rate)
-    n = int(audio.shape[0])
-    new_n = max(1, int(round(n / rate)))
-    if new_n == n:
-        return audio
-    x_old = np.linspace(0.0, 1.0, n, endpoint=False)
-    x_new = np.linspace(0.0, 1.0, new_n, endpoint=False)
-    return np.interp(x_new, x_old, audio.astype(np.float64)).astype(np.float32)
+# Piper Italian voice (rhasspy/piper-voices). facebook/mms-tts-ita does not exist on HF
+# (Italian has MMS ASR only — see HF forum #139990); Piper Paola is the dedicated engine.
+_PIPER_ITA_VOICE_ID = "it_IT-paola-medium"
+_PIPER_ITA_ONNX_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+    "it/it_IT/paola/medium/it_IT-paola-medium.onnx"
+)
+_PIPER_ITA_JSON_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+    "it/it_IT/paola/medium/it_IT-paola-medium.onnx.json"
+)
+_PIPER_ITA_CHUNK_CHARS = 280  # Paola can glitch on long unbroken phrases
 
 
-def _load_mms_italian():
-    """Load facebook/mms-tts-ita (VitsModel + tokenizer); cache at module level."""
+def _piper_cache_dir():
+    """Repo-local .cache/piper/ (created on demand)."""
+    from pathlib import Path
+
+    cache = Path(__file__).resolve().parent.parent / ".cache" / "piper"
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
+
+
+def _ensure_piper_italian_files():
+    """Download Paola onnx + json into the cache dir if missing. Returns (onnx_path, json_path)."""
+    import urllib.request
+    from pathlib import Path
+
+    cache = _piper_cache_dir()
+    onnx_path = cache / f"{_PIPER_ITA_VOICE_ID}.onnx"
+    json_path = cache / f"{_PIPER_ITA_VOICE_ID}.onnx.json"
+    downloads = [
+        (onnx_path, _PIPER_ITA_ONNX_URL),
+        (json_path, _PIPER_ITA_JSON_URL),
+    ]
+    for dest, url in downloads:
+        if dest.is_file() and dest.stat().st_size > 0:
+            continue
+        tmp = Path(str(dest) + ".partial")
+        try:
+            urllib.request.urlretrieve(url, tmp)
+            tmp.replace(dest)
+        except Exception as e:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            raise RuntimeError(
+                f"Piper Italian: failed to download {dest.name} from Hugging Face: {e}. "
+                f"URL: {url}"
+            ) from e
+    return onnx_path, json_path
+
+
+def _load_piper_italian():
+    """Load PiperVoice for it_IT-paola-medium; cache at module level."""
     try:
-        import torch
-        from transformers import AutoTokenizer, VitsModel
+        from piper import PiperVoice
     except ImportError as e:
         raise RuntimeError(
-            f"MMS Italian dependencies not installed: {e}. "
-            'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio)'
+            f"Piper Italian dependencies not installed: {e}. "
+            'Install: pip install ".[piper]" (or: pip install piper-tts onnxruntime)'
         ) from e
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    cache_key = f"_mms_ita_{device}"
+    cache_key = "_piper_ita_paola"
     if not _model_cache_has(cache_key):
-        model = VitsModel.from_pretrained("facebook/mms-tts-ita")
-        model = model.to(device)
-        model.eval()
-        tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ita")
-        _model_cache_set(cache_key, (model, tokenizer, device))
+        onnx_path, _json_path = _ensure_piper_italian_files()
+        voice = PiperVoice.load(str(onnx_path))
+        _model_cache_set(cache_key, voice)
     return _model_cache_get(cache_key)
 
 
-def _speak_mms_italian(text: str, rate: float = 1.0) -> bytes:
-    """Synthesize Italian text with facebook/mms-tts-ita; return WAV bytes.
+def _speak_piper_italian(text: str, rate: float = 1.0) -> bytes:
+    """Synthesize Italian text with Piper Paola (it_IT-paola-medium); return WAV bytes.
 
-    Rate is approximated by simple resampling when != 1.0 (no native speed).
+    Long text is chunked (~280 chars) because Paola can glitch on long phrases.
+    Rate maps to Piper length_scale (higher rate → lower length_scale = faster).
     """
-    import numpy as np
-    import soundfile as sf
+    import wave
 
-    # Load first so missing deps raise the clear RuntimeError (not a bare ImportError).
-    model, tokenizer, device = _load_mms_italian()
-    import torch
+    try:
+        from piper import SynthesisConfig
+    except ImportError as e:
+        raise RuntimeError(
+            f"Piper Italian dependencies not installed: {e}. "
+            'Install: pip install ".[piper]" (or: pip install piper-tts onnxruntime)'
+        ) from e
+
+    voice = _load_piper_italian()
     text = _preprocess_tts_text(text or "")
     if not text:
         return b""
 
-    inputs = tokenizer(text, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    with torch.no_grad():
-        waveform = model(**inputs).waveform
-    audio = waveform.squeeze().detach().cpu().float().numpy()
-    if audio.ndim > 1:
-        audio = audio.reshape(-1)
-    audio = _approx_speed_change(audio, rate)
-    sr = int(getattr(model.config, "sampling_rate", 16000) or 16000)
+    chunks = split_for_xtts(text, max_chars=_PIPER_ITA_CHUNK_CHARS)
+    rate_f = float(rate) if rate else 1.0
+    if rate_f <= 0:
+        rate_f = 1.0
+    # length_scale: 1.0 = normal; >1 slower; <1 faster
+    length_scale = 1.0 / rate_f
+    syn_config = None
+    if abs(length_scale - 1.0) >= 1e-3:
+        syn_config = SynthesisConfig(length_scale=length_scale)
+
     buf = io.BytesIO()
-    sf.write(buf, audio, sr, format="WAV")
-    buf.seek(0)
-    return buf.read()
+    with wave.open(buf, "wb") as wav_file:
+        first = True
+        for chunk in chunks:
+            if not chunk.strip():
+                continue
+            # Only the first call may set WAV format params; later calls append frames.
+            kwargs = {"set_wav_format": first}
+            if syn_config is not None:
+                kwargs["syn_config"] = syn_config
+            voice.synthesize_wav(chunk, wav_file, **kwargs)
+            first = False
+    return buf.getvalue()
 
 
 
@@ -590,11 +634,13 @@ def split_for_xtts(t: str, max_chars: int = 200) -> list:
 
 
 def split_for_tts(text: str, engine: str) -> list:
-    """Split processed text into progressive segments. XTTS/MMS use ~200-char chunks;
+    """Split processed text into progressive segments. XTTS/Piper use short chunks;
     Edge/Kokoro use longer sentence groups (~500 chars) for fewer players."""
     processed = text if not text else text
-    if engine in ("xtts", "mms_italian"):
-        return split_for_xtts(processed, max_chars=200)
+    if engine in ("xtts", "piper_italian"):
+        # Piper Paola glitches on long phrases — keep chunks short (~280 chars).
+        max_c = _PIPER_ITA_CHUNK_CHARS if engine == "piper_italian" else 200
+        return split_for_xtts(processed, max_chars=max_c)
     # Group sentences into ~500-char segments for progressive Edge/Kokoro
     max_chars = 500
     result, current = [], ""
@@ -737,8 +783,8 @@ def _engine_key(tts_engine: str) -> str:
         return "kokoro"
     if tts_engine == "XTTS":
         return "xtts"
-    if tts_engine == "MMS Italian":
-        return "mms_italian"
+    if tts_engine == "Piper Italian":
+        return "piper_italian"
     return "edge"
 
 
@@ -794,8 +840,8 @@ def _generate_one(
         # Single segment — do not re-split
         audio_bytes = _speak_xtts_chunks([processed], voice, spk, rate)
         fmt = "audio/wav"
-    elif engine == "mms_italian":
-        audio_bytes = _speak_mms_italian(processed, rate)
+    elif engine == "piper_italian":
+        audio_bytes = _speak_piper_italian(processed, rate)
         fmt = "audio/wav"
     else:
         audio_bytes = _speak_edge(processed, voice, rate)
@@ -1473,7 +1519,7 @@ def resolve_english_voice(tts_engine: str, tts_voice: str) -> tuple[str, str, st
         return "Kokoro", tts_voice, "kokoro"
     if tts_engine == "Edge TTS":
         return "Edge TTS", tts_voice, "edge"
-    # XTTS / MMS Italian (or unknown): prefer local Kokoro English voice
+    # XTTS / Piper Italian (or unknown): prefer local Kokoro English voice
     return "Kokoro", DEFAULT_EN_KOKORO_VOICE, "kokoro"
 
 
@@ -1574,8 +1620,8 @@ def speak_text(
                     return
                 audio_bytes = _speak_xtts(processed, voice, st.session_state.xtts_speaker_wav, rate)
                 fmt = "audio/wav"
-            elif engine == "mms_italian":
-                audio_bytes = _speak_mms_italian(processed, rate)
+            elif engine == "piper_italian":
+                audio_bytes = _speak_piper_italian(processed, rate)
                 fmt = "audio/wav"
             else:
                 audio_bytes = _speak_edge(processed, voice, rate)
@@ -1713,8 +1759,8 @@ def _get_or_generate_audio(text: str, voice: str, rate: float, engine: str) -> b
     elif engine == "xtts":
         audio_bytes = _speak_xtts(processed, voice, st.session_state.xtts_speaker_wav, rate)
         fmt = "audio/wav"
-    elif engine == "mms_italian":
-        audio_bytes = _speak_mms_italian(processed, rate)
+    elif engine == "piper_italian":
+        audio_bytes = _speak_piper_italian(processed, rate)
         fmt = "audio/wav"
     else:
         audio_bytes = _speak_edge(processed, voice, rate)
@@ -1740,10 +1786,10 @@ def speak_bilingual_vocab(
 
     book_ek = (
         _engine_key(book_engine)
-        if book_engine in ("Edge TTS", "Kokoro", "XTTS", "MMS Italian")
+        if book_engine in ("Edge TTS", "Kokoro", "XTTS", "Piper Italian")
         else book_engine
     )
-    if book_ek not in ("edge", "kokoro", "xtts", "mms_italian"):
+    if book_ek not in ("edge", "kokoro", "xtts", "piper_italian"):
         book_ek = "xtts"
 
     # Build playlist: each entry → (word, book) then (translation, edge)

@@ -20,8 +20,8 @@ pydub
 # huggingface_hub
 # transformers>=4.33.0,<5.0
 
-# Optional: Facebook MMS-TTS Italian (VITS via transformers)
-#   pip install transformers torch torchaudio
-#   # or: pip install ".[mms]"
-# First run downloads facebook/mms-tts-ita from Hugging Face.
+# Optional: Piper Italian TTS (dedicated Paola voice; replaces non-existent facebook/mms-tts-ita)
+#   pip install piper-tts onnxruntime
+#   # or: pip install ".[piper]"
+# First run downloads it_IT-paola-medium (~60 MB) into .cache/piper/.
 

@@ -326,9 +326,9 @@ export async function listVoices() {
     edge: Record<string, string>;
     kokoro: Record<string, string>;
     xtts_languages: Record<string, string>;
-    mms_italian?: Record<string, string>;
+    piper_italian?: Record<string, string>;
     edge_lang_voices?: Record<string, string>;
-    mms_available?: boolean;
+    piper_italian_available?: boolean;
   }>(await fetch(`${BASE}/api/tts/voices`));
 }
 
