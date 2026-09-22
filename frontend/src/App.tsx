@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   deleteBook,
   fetchSummary,
@@ -11,12 +11,20 @@ import {
   listVoices,
   patchBook,
   startSectionTts,
+  startTextTts,
   uploadBook,
   uploadSpeaker,
   type BookListItem,
   type SectionMeta,
   type VocabEntry,
 } from './api';
+import {
+  pickDefaultsForLanguage,
+  pickEdgeEnglish,
+  pickEnglishSummaryDefaults,
+  type EngineName,
+  type VoicesPayload,
+} from './ttsDefaults';
 import { AudiobookPanel } from './AudiobookPanel';
 import { ChatPanel } from './ChatPanel';
 import { ProgressivePlayer } from './ProgressivePlayer';
@@ -53,18 +61,15 @@ export default function App() {
   const [modelLive, setModelLive] = useState(false);
   const [model, setModel] = useState('llama3.1:8b');
   const [language, setLanguage] = useState('Italian');
-  const [engine, setEngine] = useState<(typeof ENGINES)[number]>('Edge TTS');
+  const [engine, setEngine] = useState<EngineName>('Edge TTS');
   const [rate, setRate] = useState(1.0);
   const [appMode, setAppMode] = useState<AppMode>('language_learning');
-  const [voices, setVoices] = useState<{
-    edge: Record<string, string>;
-    kokoro: Record<string, string>;
-    xtts_languages: Record<string, string>;
-    piper_italian?: Record<string, string>;
-    piper_italian_available?: boolean;
-  } | null>(null);
+  const [voices, setVoices] = useState<VoicesPayload | null>(null);
   const [voice, setVoice] = useState('Aria (US, Female)');
   const [speakerKey, setSpeakerKey] = useState<string | null>(null);
+  /** When true, sidebar engine/voice changes are respected until language changes. */
+  const ttsUserOverride = useRef(false);
+  const lastAutoLang = useRef<string | null>(null);
 
   const [bookId, setBookId] = useState<string | null>(null);
   const [filename, setFilename] = useState('');
@@ -92,6 +97,12 @@ export default function App() {
     [engine, voice, rate, speakerKey],
   );
 
+  /** English gist / summary always uses Kokoro (preferred) or Edge — never Piper Italian. */
+  const summaryTtsOpts = useMemo(() => {
+    const picked = pickEnglishSummaryDefaults(voices);
+    return { ...picked, rate, speaker_key: null as string | null };
+  }, [voices, rate]);
+
   useEffect(() => {
     listModels()
       .then((r) => {
@@ -105,21 +116,22 @@ export default function App() {
       .catch(() => undefined);
   }, []);
 
+  // Auto-apply engine/voice defaults on first voices load and when language changes.
+  // Manual sidebar changes set ttsUserOverride and are left alone until language changes.
   useEffect(() => {
     if (!voices) return;
-    if (engine === 'Edge TTS') {
-      const keys = Object.keys(voices.edge);
-      if (keys.length) setVoice(keys[0]);
-    } else if (engine === 'Kokoro') {
-      const keys = Object.keys(voices.kokoro);
-      if (keys.length) setVoice(keys[0]);
-    } else if (engine === 'Piper Italian') {
-      const keys = Object.keys(voices.piper_italian || { 'Paola (it_IT medium)': 'it_IT-paola-medium' });
-      if (keys.length) setVoice(keys[0]);
-    } else {
-      setVoice(language in voices.xtts_languages ? language : 'Italian');
+    const langChanged = lastAutoLang.current !== null && lastAutoLang.current !== language;
+    if (langChanged) {
+      ttsUserOverride.current = false;
     }
-  }, [engine, voices]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (ttsUserOverride.current && lastAutoLang.current === language) return;
+    const picked = pickDefaultsForLanguage(language, voices);
+    if (picked) {
+      setEngine(picked.engine);
+      setVoice(picked.voice);
+    }
+    lastAutoLang.current = language;
+  }, [language, voices]);
 
   const refreshLibrary = useCallback(async () => {
     try {
@@ -340,6 +352,59 @@ export default function App() {
     }
   };
 
+  const runReadSummary = async () => {
+    if (!summary) return;
+    setBusy('summary-tts');
+    setError('');
+    try {
+      try {
+        const r = await startTextTts({ text: summary, ...summaryTtsOpts });
+        setJobId(r.job_id);
+      } catch (e) {
+        if (summaryTtsOpts.engine === 'Kokoro') {
+          const edge = pickEdgeEnglish(voices);
+          const r = await startTextTts({
+            text: summary,
+            engine: edge.engine,
+            voice: edge.voice,
+            rate,
+            speaker_key: null,
+          });
+          setJobId(r.job_id);
+        } else {
+          throw e;
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onEngineChange = (en: EngineName) => {
+    ttsUserOverride.current = true;
+    setEngine(en);
+    if (!voices) return;
+    if (en === 'Edge TTS') {
+      const keys = Object.keys(voices.edge);
+      if (keys.length) setVoice(keys[0]);
+    } else if (en === 'Kokoro') {
+      const keys = Object.keys(voices.kokoro);
+      if (keys.length) setVoice(keys[0]);
+    } else if (en === 'Piper Italian') {
+      const keys = Object.keys(voices.piper_italian || { 'Paola (it_IT medium)': 'it_IT-paola-medium' });
+      if (keys.length) setVoice(keys[0]);
+    } else {
+      setVoice(language in voices.xtts_languages ? language : 'Italian');
+    }
+  };
+
+  const onVoiceChange = (v: string) => {
+    ttsUserOverride.current = true;
+    setVoice(v);
+  };
+
   const playWord = async (word: string) => {
     setWordBusy(word);
     try {
@@ -360,13 +425,20 @@ export default function App() {
 
   const voiceOptions = useMemo(() => {
     if (!voices) return [] as string[];
-    if (engine === 'Edge TTS') return Object.keys(voices.edge);
+    if (engine === 'Edge TTS') {
+      const keys = Object.keys(voices.edge);
+      // Include raw Edge Neural id when auto-defaulted to a book-language voice.
+      if (voice && !keys.includes(voice)) {
+        return [...keys, voice];
+      }
+      return keys;
+    }
     if (engine === 'Kokoro') return Object.keys(voices.kokoro);
     if (engine === 'Piper Italian') {
       return Object.keys(voices.piper_italian || { 'Paola (it_IT medium)': 'it_IT-paola-medium' });
     }
     return Object.keys(voices.xtts_languages);
-  }, [engine, voices]);
+  }, [engine, voices, voice]);
 
   const hasBook = Boolean(bookId);
 
@@ -467,6 +539,7 @@ export default function App() {
               value={language}
               onChange={(e) => {
                 const lang = e.target.value;
+                ttsUserOverride.current = false;
                 setLanguage(lang);
                 if (bookId) void patchBook(bookId, { language: lang }).then(() => refreshLibrary());
               }}
@@ -484,7 +557,7 @@ export default function App() {
           TTS engine
           <select
             value={engine}
-            onChange={(e) => setEngine(e.target.value as (typeof ENGINES)[number])}
+            onChange={(e) => onEngineChange(e.target.value as EngineName)}
           >
             {ENGINES.map((en) => (
               <option key={en} value={en}>
@@ -496,7 +569,7 @@ export default function App() {
 
         <label className="field">
           Voice / language
-          <select value={voice} onChange={(e) => setVoice(e.target.value)}>
+          <select value={voice} onChange={(e) => onVoiceChange(e.target.value)}>
             {voiceOptions.map((v) => (
               <option key={v} value={v}>
                 {v}
@@ -535,6 +608,19 @@ export default function App() {
                 until then.
               </div>
             )}
+          </div>
+        )}
+
+        {language === 'Italian' && voices?.piper_italian_available === false && engine !== 'Piper Italian' && (
+          <div className="muted" style={{ marginTop: '-0.35rem', marginBottom: '0.75rem', color: '#fbbf24' }}>
+            Piper deps missing — Italian defaults use Edge. Install{' '}
+            <code>pip install &quot;.[piper]&quot;</code> then restart uvicorn.
+          </div>
+        )}
+
+        {engine === 'XTTS' && language === 'Estonian' && !speakerKey && (
+          <div className="muted" style={{ marginTop: '-0.35rem', marginBottom: '0.75rem' }}>
+            Estonian defaults to XTTS — upload a speaker WAV above to start.
           </div>
         )}
 
@@ -661,6 +747,21 @@ export default function App() {
               <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.92rem' }}>
                 {summary || <span className="muted">Not generated yet.</span>}
               </div>
+              {summary && (
+                <div className="btn-row" style={{ marginTop: '0.65rem' }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={!!busy}
+                    onClick={() => void runReadSummary()}
+                  >
+                    Read summary
+                  </button>
+                  <span className="muted" style={{ fontSize: '0.8rem' }}>
+                    Uses {summaryTtsOpts.engine} (English)
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="card">

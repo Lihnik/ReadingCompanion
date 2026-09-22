@@ -115,6 +115,7 @@ pip install piper-tts onnxruntime
 Then **restart uvicorn** so the API process picks up the new packages.
 
 - Select **Piper Italian** in the sidebar TTS engine list (voice: **Paola (it_IT medium)**; no speaker WAV).
+- **Smart TTS defaults** (sidebar): Italian → Piper Paola when available (else Edge Italian); Estonian → XTTS; English → Kokoro (else Edge). Manual engine/voice changes stick until the book language changes. **Read summary** always uses an English engine (Kokoro preferred, Edge fallback), even when the main engine is Piper Italian.
 - First synthesis downloads the ONNX + JSON (~60 MB) into repo `.cache/piper/`.
 - Speed slider maps to Piper `length_scale` (native; no crude resample).
 - Long phrases are chunked (~280 chars) because Paola can glitch on very long unbroken text.
