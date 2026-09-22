@@ -305,8 +305,18 @@ export async function fetchWordAudio(
     }),
   });
   if (!res.ok) {
-    const t = await res.text();
-    throw new Error(t || res.statusText);
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail || body);
+    } catch {
+      try {
+        detail = await res.text();
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new Error(detail || res.statusText);
   }
   return res.blob();
 }
@@ -318,6 +328,7 @@ export async function listVoices() {
     xtts_languages: Record<string, string>;
     mms_italian?: Record<string, string>;
     edge_lang_voices?: Record<string, string>;
+    mms_available?: boolean;
   }>(await fetch(`${BASE}/api/tts/voices`));
 }
 

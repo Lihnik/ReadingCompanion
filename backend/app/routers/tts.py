@@ -19,6 +19,7 @@ from companion.tts import (
     edge_voice_for_language,
     estimate_audio_seconds,
     generate_vocab_word_audio,
+    mms_italian_available,
     split_for_tts,
 )
 
@@ -300,21 +301,30 @@ def pronounce_word(body: WordRequest):
     if not xtts_lang:
         xtts_lang = XTTS_LANGUAGES.get(body.language)
 
-    result = generate_vocab_word_audio(
-        word,
-        body.language,
-        body.rate,
-        xtts_voice=xtts_lang,
-        speaker_wav_bytes=speaker,
-        preferred_engine=body.engine,
-    )
+    try:
+        result = generate_vocab_word_audio(
+            word,
+            body.language,
+            body.rate,
+            xtts_voice=xtts_lang,
+            speaker_wav_bytes=speaker,
+            preferred_engine=body.engine,
+        )
+    except Exception as e:
+        raise HTTPException(502, str(e)) from e
     if not result:
         edge = edge_voice_for_language(body.language)
-        hint = (
-            "No Edge voice for this language and no speaker WAV for XTTS fallback."
-            if not edge
-            else "Generation failed."
-        )
+        pref = (body.engine or "").strip()
+        if pref in ("MMS Italian", "mms_italian") and not mms_italian_available():
+            hint = (
+                'MMS Italian failed: dependencies missing. '
+                'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio), '
+                "then restart uvicorn. Word ▶ also falls back to Edge when Edge is available."
+            )
+        elif not edge:
+            hint = "No Edge voice for this language and no speaker WAV for XTTS fallback."
+        else:
+            hint = "Generation failed (MMS/Edge/XTTS all unavailable for this word)."
         raise HTTPException(502, hint)
 
     audio, mime = result
@@ -468,4 +478,15 @@ def list_voices():
         "xtts_languages": XTTS_LANGUAGES,
         "mms_italian": MMS_ITALIAN_VOICES,
         "edge_lang_voices": dict(EDGE_LANG_VOICES),
+        "mms_available": mms_italian_available(),
+    }
+
+
+@router.get("/engines")
+def list_engines():
+    """Engine availability hints for the UI (deps may still need a model download)."""
+    return {
+        "engines": ["Edge TTS", "Kokoro", "XTTS", "MMS Italian"],
+        "mms_available": mms_italian_available(),
+        "mms_install": 'pip install ".[mms]"',
     }

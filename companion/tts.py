@@ -33,45 +33,69 @@ _VOCAB_AUDIO_CACHE: dict = {}
 
 
 def _has_streamlit_ctx() -> bool:
+    """True only inside a live Streamlit script run.
+
+    Must pass suppress_warning=True — otherwise Streamlit logs
+    "missing ScriptRunContext!" on every check from FastAPI worker threads.
+    """
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx
-        return get_script_run_ctx() is not None
+        return get_script_run_ctx(suppress_warning=True) is not None
     except Exception:
         return False
 
 
+def _st_module():
+    """Return the streamlit module when a script run context exists; else None.
+
+    FastAPI / bare callers must never touch st.session_state.
+    """
+    if not _has_streamlit_ctx():
+        return None
+    try:
+        import streamlit as st_mod
+        return st_mod
+    except Exception:
+        return None
+
+
 def _model_cache_has(key: str) -> bool:
-    if _has_streamlit_ctx():
-        return key in st.session_state
+    st_mod = _st_module()
+    if st_mod is not None:
+        return key in st_mod.session_state
     return key in _MODEL_CACHE
 
 
 def _model_cache_get(key: str, default=None):
-    if _has_streamlit_ctx():
-        return st.session_state.get(key, default)
+    st_mod = _st_module()
+    if st_mod is not None:
+        return st_mod.session_state.get(key, default)
     return _MODEL_CACHE.get(key, default)
 
 
 def _model_cache_set(key: str, value) -> None:
-    if _has_streamlit_ctx():
-        st.session_state[key] = value
+    st_mod = _st_module()
+    if st_mod is not None:
+        st_mod.session_state[key] = value
     else:
         _MODEL_CACHE[key] = value
 
 
 def _audio_cache_dict() -> dict:
-    if _has_streamlit_ctx():
-        if "tts_cache" not in st.session_state:
-            st.session_state.tts_cache = {}
-        return st.session_state.tts_cache
+    st_mod = _st_module()
+    if st_mod is not None:
+        if "tts_cache" not in st_mod.session_state:
+            st_mod.session_state.tts_cache = {}
+        return st_mod.session_state.tts_cache
     return _AUDIO_CACHE
 
 
 def _vocab_audio_cache_dict() -> dict:
-    if _has_streamlit_ctx():
-        if "vocab_audio_cache" not in st.session_state:
-            st.session_state.vocab_audio_cache = {}
-        return st.session_state.vocab_audio_cache
+    st_mod = _st_module()
+    if st_mod is not None:
+        if "vocab_audio_cache" not in st_mod.session_state:
+            st_mod.session_state.vocab_audio_cache = {}
+        return st_mod.session_state.vocab_audio_cache
     return _VOCAB_AUDIO_CACHE
 
 
@@ -112,6 +136,43 @@ def get_vocab_audio_cached(word: str, book_language: str, tts_rate: float = 1.0)
     return None
 
 
+def _format_mms_failure(exc: BaseException) -> str:
+    """User-facing detail when MMS Italian cannot synthesize."""
+    base = str(exc).strip() or exc.__class__.__name__
+    low = base.lower()
+    # _load_mms_italian already returns a clear "MMS Italian dependencies…" message.
+    if low.startswith("mms italian"):
+        if "pip install" not in low:
+            return (
+                f"{base} "
+                'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio)'
+            )
+        return base
+    if (
+        "not installed" in low
+        or "no module named" in low
+        or "transformers" in low
+        or "torch" in low
+    ):
+        if "pip install" not in low:
+            return (
+                f"MMS Italian failed: {base}. "
+                'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio)'
+            )
+        return f"MMS Italian failed: {base}"
+    return f"MMS Italian failed: {base}"
+
+
+def mms_italian_available() -> bool:
+    """True when transformers + torch import successfully (model download may still be needed)."""
+    try:
+        import torch  # noqa: F401
+        from transformers import AutoTokenizer, VitsModel  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def generate_vocab_word_audio(
     word: str,
     book_language: str,
@@ -123,7 +184,9 @@ def generate_vocab_word_audio(
     """Generate one vocab word clip and cache it. Does NOT touch progressive player state.
 
     Pass speaker_wav_bytes explicitly for non-Streamlit callers (FastAPI).
-    If preferred_engine is MMS Italian (label or key), use MMS for consistency with section TTS.
+    If preferred_engine is MMS Italian (label or key), try MMS first for consistency with
+    section TTS; on failure fall through to Edge (then XTTS). If MMS was preferred and
+    every engine fails, re-raise a RuntimeError with the MMS detail for API 502 messages.
     """
     word = (word or "").strip()
     if not word:
@@ -131,6 +194,7 @@ def generate_vocab_word_audio(
     vocab_cache = _vocab_audio_cache_dict()
     audio_cache = _audio_cache_dict()
 
+    mms_error: Exception | None = None
     pref = (preferred_engine or "").strip()
     pref_key = _engine_key(pref) if pref in ("Edge TTS", "Kokoro", "XTTS", "MMS Italian") else pref
     if pref_key == "mms_italian" or pref == "mms_italian":
@@ -148,8 +212,9 @@ def generate_vocab_word_audio(
                 _cache_put(cache_key, audio_bytes, fmt)
             vocab_cache[vkey] = (audio_bytes, fmt)
             return audio_bytes, fmt
-        except Exception:
-            return None
+        except Exception as e:
+            mms_error = e
+            # Fall through to Edge / XTTS rather than returning None immediately.
 
     edge_voice = edge_voice_for_language(book_language)
     if edge_voice:
@@ -172,9 +237,13 @@ def generate_vocab_word_audio(
 
     lang = (xtts_voice or "").strip() or XTTS_LANGUAGES.get(book_language) or "en"
     spk = speaker_wav_bytes
-    if spk is None and _has_streamlit_ctx():
-        spk = st.session_state.get("xtts_speaker_wav") or b""
+    if spk is None:
+        st_mod = _st_module()
+        if st_mod is not None:
+            spk = st_mod.session_state.get("xtts_speaker_wav") or b""
     if not spk:
+        if mms_error is not None:
+            raise RuntimeError(_format_mms_failure(mms_error)) from mms_error
         return None
     prompt = word.rstrip(".!?…") + "."
     vkey = _vocab_cache_key(word, book_language, f"xtts:{lang}")
@@ -198,6 +267,8 @@ def generate_vocab_word_audio(
         vocab_cache[vkey] = (audio_bytes, fmt)
         return audio_bytes, fmt
     except Exception:
+        if mms_error is not None:
+            raise RuntimeError(_format_mms_failure(mms_error)) from mms_error
         return None
 
 
@@ -412,7 +483,7 @@ def _load_mms_italian():
     except ImportError as e:
         raise RuntimeError(
             f"MMS Italian dependencies not installed: {e}. "
-            "Run: pip install transformers torch torchaudio soundfile"
+            'Install: pip install ".[mms]" (or: pip install transformers torch torchaudio)'
         ) from e
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -433,9 +504,10 @@ def _speak_mms_italian(text: str, rate: float = 1.0) -> bytes:
     """
     import numpy as np
     import soundfile as sf
-    import torch
 
+    # Load first so missing deps raise the clear RuntimeError (not a bare ImportError).
     model, tokenizer, device = _load_mms_italian()
+    import torch
     text = _preprocess_tts_text(text or "")
     if not text:
         return b""
@@ -679,8 +751,9 @@ def _make_tts_cache_key(
 ) -> str:
     if engine == "xtts":
         if speaker_wav_bytes is None:
-            if _has_streamlit_ctx():
-                speaker_wav_bytes = st.session_state.get("xtts_speaker_wav") or b""
+            st_mod = _st_module()
+            if st_mod is not None:
+                speaker_wav_bytes = st_mod.session_state.get("xtts_speaker_wav") or b""
             else:
                 speaker_wav_bytes = b""
         spk_hash = hashlib.md5(speaker_wav_bytes or b"").hexdigest()
@@ -712,8 +785,10 @@ def _generate_one(
         fmt = "audio/wav"
     elif engine == "xtts":
         spk = speaker_wav_bytes
-        if spk is None and _has_streamlit_ctx():
-            spk = st.session_state.get("xtts_speaker_wav") or b""
+        if spk is None:
+            st_mod = _st_module()
+            if st_mod is not None:
+                spk = st_mod.session_state.get("xtts_speaker_wav") or b""
         if not spk:
             raise RuntimeError("Upload a speaker WAV file to use XTTS.")
         # Single segment — do not re-split
@@ -1926,20 +2001,35 @@ def _progressive_fragment_tick():
             st.rerun()
 
 
-# Build fragment wrappers once at import (no-op host if st.fragment missing).
-_HAS_FRAGMENT = hasattr(st, "fragment")
-if _HAS_FRAGMENT:
-    try:
-        from datetime import timedelta
-        _progressive_fragment_polling = st.fragment(run_every=timedelta(seconds=0.7))(
-            _progressive_fragment_tick
-        )
-    except TypeError:
-        _progressive_fragment_polling = st.fragment(_progressive_fragment_tick)
-    _progressive_fragment_static = st.fragment(lambda: render_tts_player(mount_audio=False))
-else:
-    _progressive_fragment_polling = None
-    _progressive_fragment_static = None
+# Fragment wrappers — built lazily so FastAPI import never touches st.fragment
+# (which logs missing ScriptRunContext without a live Streamlit run).
+_HAS_FRAGMENT = None  # None = uninitialized; bool once ensured
+_progressive_fragment_polling = None
+_progressive_fragment_static = None
+
+
+def _ensure_fragments() -> bool:
+    """Register st.fragment wrappers once inside a live Streamlit context."""
+    global _HAS_FRAGMENT, _progressive_fragment_polling, _progressive_fragment_static
+    if _HAS_FRAGMENT is not None:
+        return bool(_HAS_FRAGMENT)
+    if not _has_streamlit_ctx():
+        _HAS_FRAGMENT = False
+        return False
+    _HAS_FRAGMENT = hasattr(st, "fragment")
+    if _HAS_FRAGMENT:
+        try:
+            from datetime import timedelta
+            _progressive_fragment_polling = st.fragment(run_every=timedelta(seconds=0.7))(
+                _progressive_fragment_tick
+            )
+        except TypeError:
+            _progressive_fragment_polling = st.fragment(_progressive_fragment_tick)
+        _progressive_fragment_static = st.fragment(lambda: render_tts_player(mount_audio=False))
+    else:
+        _progressive_fragment_polling = None
+        _progressive_fragment_static = None
+    return bool(_HAS_FRAGMENT)
 
 
 def maybe_continue_progressive():
@@ -1953,7 +2043,7 @@ def maybe_continue_progressive():
     audio_bytes = st.session_state.get("tts_audio") or b""
     just = int(st.session_state.get("tts_progressive_just_added", -1))
 
-    if _HAS_FRAGMENT and (active or has_playlist):
+    if _ensure_fragments() and (active or has_playlist):
         audios = st.session_state.get("tts_segment_audios") or []
         if audios:
             _push_segments_to_browser(

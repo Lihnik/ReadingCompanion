@@ -56,6 +56,7 @@ export default function App() {
     kokoro: Record<string, string>;
     xtts_languages: Record<string, string>;
     mms_italian?: Record<string, string>;
+    mms_available?: boolean;
   } | null>(null);
   const [voice, setVoice] = useState('Aria (US, Female)');
   const [speakerKey, setSpeakerKey] = useState<string | null>(null);
@@ -394,6 +395,12 @@ export default function App() {
         {engine === 'MMS Italian' && (
           <div className="muted" style={{ marginTop: '-0.35rem', marginBottom: '0.75rem' }}>
             Dedicated Italian (facebook/mms-tts-ita)
+            {voices && voices.mms_available === false && (
+              <div style={{ color: '#fbbf24', marginTop: '0.35rem' }}>
+                MMS deps missing — install <code>pip install &quot;.[mms]&quot;</code> then restart
+                uvicorn. Word ▶ falls back to Edge until then.
+              </div>
+            )}
           </div>
         )}
 

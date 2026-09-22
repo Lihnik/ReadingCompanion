@@ -96,10 +96,30 @@ pip install transformers torch torchaudio
 # or: pip install ".[mms]"
 ```
 
+Then **restart uvicorn** so the API process picks up the new packages.
+
 - Select **MMS Italian** in the sidebar TTS engine list (no speaker WAV).
 - First run downloads the model from Hugging Face and caches it locally.
 - Speed slider uses approximate resampling (no native rate; pitch shifts with speed).
+- `GET /api/tts/voices` includes `mms_available: bool` so the UI can hint when deps are missing.
+- Vocab word ▶ prefers MMS when that engine is selected, then **falls back to Edge** if MMS fails.
 
+### Troubleshooting
+
+**Word ▶ returns HTTP 502**
+
+- If the JSON `detail` mentions `No module named 'transformers'` (or torch), install MMS deps and restart:
+
+  ```bash
+  pip install ".[mms]"
+  # restart: PYTHONPATH=. uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+  ```
+
+- With MMS still broken, word ▶ should still play via **Edge** for languages that have an Edge voice (e.g. Italian). Section read-aloud with MMS Italian surfaces the real error on the progressive job (`seg.error`) instead of silent failure.
+
+**Backend logs `missing ScriptRunContext!`**
+
+- Shared `companion/tts.py` is used by both Streamlit and FastAPI. Cache helpers must not call `st.session_state` (or `get_script_run_ctx()` without `suppress_warning=True`) from AnyIO worker threads. If you still see these warnings on every `/api/tts/word`, pull the latest `grokbot-react-rewrite` fix.
 
 ### Modes
 
@@ -150,7 +170,8 @@ pip install transformers torch torchaudio
 | GET | `/api/tts/audiobook/{id}` | status |
 | GET | `/api/tts/audiobook/{id}/download` | file |
 | POST | `/api/tts/audiobook/{id}/stop` | cancel |
-| GET | `/api/tts/voices` | Edge / Kokoro / XTTS maps |
+| GET | `/api/tts/voices` | Edge / Kokoro / XTTS / MMS maps + `mms_available` |
+| GET | `/api/tts/engines` | Engine list + MMS install hint |
 
 ## Known gaps
 

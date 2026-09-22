@@ -187,10 +187,14 @@ export function ProgressivePlayer({
             setStatus('Stopped');
             break;
           }
+          const segErr = data.segments.find((s) => s.error)?.error;
+          const jobErr = data.error || segErr;
           setStatus(
-            data.done
-              ? `Ready ${data.ready_count}/${data.total}`
-              : `Loading ${data.ready_count}/${data.total}…`,
+            jobErr
+              ? `TTS error: ${jobErr}`
+              : data.done
+                ? `Ready ${data.ready_count}/${data.total}`
+                : `Loading ${data.ready_count}/${data.total}…`,
           );
           await Promise.all(data.segments.map(fetchAudio));
           if (!playing && segsRef.current.length > 0 && sourceRef.current === null && !doneRef.current) {
@@ -198,6 +202,9 @@ export function ProgressivePlayer({
             await playFrom(0);
           }
           if (data.done) {
+            if (jobErr && segsRef.current.length === 0) {
+              setStatus(`TTS error: ${jobErr}`);
+            }
             onDone?.();
             break;
           }
