@@ -60,7 +60,14 @@ def _speak_kokoro(text: str, voice: str, speed: float) -> bytes:
     if cache_key not in st.session_state:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            st.session_state[cache_key] = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M", device=device)
+            try:
+                st.session_state[cache_key] = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M", device=device)
+            except RuntimeError:
+                # CUDA reported as available but fails at init — fall back to CPU
+                device = "cpu"
+                cache_key = f"_kokoro_pipeline_{lang_code}_{device}"
+                if cache_key not in st.session_state:
+                    st.session_state[cache_key] = KPipeline(lang_code=lang_code, repo_id="hexgrad/Kokoro-82M", device="cpu")
     pipeline = st.session_state[cache_key]
 
     chunks = [
@@ -142,7 +149,11 @@ def _speak_xtts(text: str, language: str, speaker_wav_bytes: bytes, speed: float
         model = Xtts.init_from_config(config)
         model.load_checkpoint(config, checkpoint_dir=model_dir, eval=True)
         if torch.cuda.is_available():
-            model.cuda()
+            try:
+                model.cuda()
+            except Exception:
+                # CUDA reports available but fails at runtime — stay on CPU
+                model.cpu()
         st.session_state[model_cache_key] = model
 
     model = st.session_state[model_cache_key]

@@ -41,7 +41,26 @@ DEFAULTS = {
     "audiobook_ext": "wav",
     "xtts_speaker_wav": b"",
     "xtts_clip_recorded": False,
+    # Language learning mode
+    "app_mode": "reading",
+    "ll_book_language": "Italian",
+    "ll_summary": "",
+    "ll_vocab": [],
 }
+
+SYSTEM_PROMPT_LL_SUMMARY = (
+    "You are a language learning assistant. When given a passage in a foreign language, "
+    "write a concise 2-3 sentence summary in English capturing the main idea. "
+    "Do not translate word-for-word — give the gist clearly and simply."
+)
+
+SYSTEM_PROMPT_LL_VOCAB = (
+    "You are a vocabulary tutor. When given a passage in a foreign language, "
+    "select exactly 5 words or short phrases that are useful to learn. "
+    "Avoid very common words (articles, basic prepositions). "
+    "For each entry use EXACTLY this format on separate lines:\n"
+    "WORD: <word>\nTRANSLATION: <English meaning>\n---"
+)
 
 EDGE_VOICES = {
     "Aria (US, Female)": "en-US-AriaNeural",

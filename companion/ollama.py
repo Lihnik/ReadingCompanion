@@ -9,6 +9,8 @@ from .constants import (
     SYSTEM_PROMPT_COMMENTARY,
     SYSTEM_PROMPT_QUESTION,
     SYSTEM_PROMPT_CHAT,
+    SYSTEM_PROMPT_LL_SUMMARY,
+    SYSTEM_PROMPT_LL_VOCAB,
 )
 
 
@@ -130,3 +132,36 @@ def build_summary_prompt(chunk_text: str) -> str:
         f"Summarize the following passage in 3-5 bullet points. "
         f"Focus on the most important ideas.\n\n{chunk_text[:MAX_CHUNK_CHARS]}\n\nSummary:"
     )
+
+
+def build_ll_summary_prompt(chunk_text: str, source_lang: str) -> str:
+    return (
+        f"The following passage is written in {source_lang}. "
+        f"Summarize it in English in 2-3 sentences:\n\n"
+        f"---\n{chunk_text[:MAX_CHUNK_CHARS]}\n---\n\nEnglish summary:"
+    )
+
+
+def build_ll_vocab_prompt(chunk_text: str, source_lang: str) -> str:
+    return (
+        f"From this {source_lang} passage, select exactly 5 vocabulary words to teach.\n\n"
+        f"---\n{chunk_text[:MAX_CHUNK_CHARS]}\n---\n\n"
+        f"Output only the 5 entries in the required format:"
+    )
+
+
+def parse_vocab_response(text: str) -> list:
+    entries = []
+    for block in text.split("---"):
+        block = block.strip()
+        if not block:
+            continue
+        word, translation = "", ""
+        for line in block.splitlines():
+            if line.upper().startswith("WORD:"):
+                word = line.split(":", 1)[-1].strip()
+            elif line.upper().startswith("TRANSLATION:"):
+                translation = line.split(":", 1)[-1].strip()
+        if word and translation:
+            entries.append({"word": word, "translation": translation})
+    return entries[:5]

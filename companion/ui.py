@@ -12,6 +12,8 @@ from .constants import (
     SYSTEM_PROMPT_COMMENTARY,
     SYSTEM_PROMPT_QUESTION,
     SYSTEM_PROMPT_CHAT,
+    SYSTEM_PROMPT_LL_SUMMARY,
+    SYSTEM_PROMPT_LL_VOCAB,
 )
 from .navigation import go_to_chunk, reset_session
 from .ollama import (
@@ -22,6 +24,9 @@ from .ollama import (
     build_feedback_prompt,
     build_chat_prompt,
     build_summary_prompt,
+    build_ll_summary_prompt,
+    build_ll_vocab_prompt,
+    parse_vocab_response,
 )
 from .hero import render_landing_hero, render_ambient_bg_html
 from .parsing import parse_epub, parse_pdf
@@ -286,6 +291,93 @@ def render_audiobook_panel(tts_voice: str, tts_rate: float, tts_engine: str):
         )
 
 
+def render_language_learning_panel(model: str, tts_voice: str, tts_rate: float, tts_engine: str, book_language: str):
+    chunk = st.session_state.pdf_chunks[st.session_state.current_chunk_idx]
+
+    st.subheader(chunk["title"])
+
+    if tts_engine != "XTTS":
+        st.info(f"Tip: Switch to the XTTS engine to read {book_language} text aloud.")
+
+    _paras = [p.strip() for p in chunk["text"].split("\n\n") if p.strip()] or [chunk["text"]]
+    _body = "".join(
+        f'<p style="margin:0 0 .8em 0;line-height:1.75;">{html.escape(p)}</p>'
+        for p in _paras
+    )
+    st.markdown(
+        f'<div style="width:100%;box-sizing:border-box;'
+        f'height:300px;overflow-y:auto;{_GLASS}'
+        f'color:rgba(225,232,248,0.95);font-size:0.9rem;'
+        f'scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.15) transparent;">'
+        f'{_body}</div>',
+        unsafe_allow_html=True,
+    )
+    tts_button(f"Read aloud in {book_language}", chunk["text"], "section", tts_voice, tts_rate, tts_engine, full_width=True)
+
+    st.markdown("---")
+
+    st.markdown("**English Summary**")
+    if not st.session_state.ll_summary:
+        with st.spinner("Generating English summary..."):
+            summary = call_ollama(
+                build_ll_summary_prompt(chunk["text"], book_language),
+                model,
+                SYSTEM_PROMPT_LL_SUMMARY,
+                num_predict=512,
+            )
+            st.session_state.ll_summary = summary
+
+    _sum_paras = [p.strip() for p in st.session_state.ll_summary.split("\n\n") if p.strip()] or [st.session_state.ll_summary]
+    _sum_body = "".join(
+        f'<p style="margin:0 0 .7em 0;line-height:1.7;">{html.escape(p)}</p>'
+        for p in _sum_paras
+    )
+    st.markdown(
+        f'<div style="width:100%;box-sizing:border-box;{_GLASS}'
+        f'color:rgba(210,225,248,0.90);font-size:0.9rem;line-height:1.7;">'
+        f'{_sum_body}</div>',
+        unsafe_allow_html=True,
+    )
+    tts_button("Read summary", st.session_state.ll_summary, "ll_summary", tts_voice, tts_rate, tts_engine)
+
+    st.markdown("---")
+
+    st.markdown("**Vocabulary**")
+    if not st.session_state.ll_vocab:
+        with st.spinner(f"Extracting {book_language} vocabulary..."):
+            raw = call_ollama(
+                build_ll_vocab_prompt(chunk["text"], book_language),
+                model,
+                SYSTEM_PROMPT_LL_VOCAB,
+                num_predict=512,
+            )
+            st.session_state.ll_vocab = parse_vocab_response(raw)
+
+    if st.session_state.ll_vocab:
+        rows = "".join(
+            f'<tr>'
+            f'<td style="padding:.45rem .75rem;font-weight:600;color:rgba(255,220,130,0.95);">{html.escape(v["word"])}</td>'
+            f'<td style="padding:.45rem .75rem;color:rgba(210,225,248,0.90);">{html.escape(v["translation"])}</td>'
+            f'</tr>'
+            for v in st.session_state.ll_vocab
+        )
+        st.markdown(
+            f'<div style="{_GLASS}">'
+            f'<table style="width:100%;border-collapse:collapse;">'
+            f'<thead><tr>'
+            f'<th style="text-align:left;padding:.4rem .75rem;font-size:.75rem;letter-spacing:.08em;'
+            f'text-transform:uppercase;color:rgba(180,180,200,0.7);">{html.escape(book_language)}</th>'
+            f'<th style="text-align:left;padding:.4rem .75rem;font-size:.75rem;letter-spacing:.08em;'
+            f'text-transform:uppercase;color:rgba(180,180,200,0.7);">English</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>',
+            unsafe_allow_html=True,
+        )
+        vocab_tts_text = ". ".join(f'{v["word"]}: {v["translation"]}' for v in st.session_state.ll_vocab)
+        tts_button("Read vocabulary", vocab_tts_text, "ll_vocab", tts_voice, tts_rate, tts_engine)
+    else:
+        st.warning("Could not extract vocabulary from this section.")
+
+
 def render_sidebar():
     with st.sidebar:
         st.title("📖 Reading Companion")
@@ -336,6 +428,26 @@ def render_sidebar():
             index=0,
             help="Make sure this model is pulled in Ollama first (e.g. `ollama pull llama3.1:8b`).",
         )
+
+        st.markdown("---")
+        st.subheader("Mode")
+        app_mode_label = st.radio(
+            "Reading mode",
+            ["Reading", "Language Learning"],
+            index=0 if st.session_state.app_mode == "reading" else 1,
+            horizontal=True,
+        )
+        st.session_state.app_mode = "reading" if app_mode_label == "Reading" else "language_learning"
+
+        if st.session_state.app_mode == "language_learning":
+            ll_lang_keys = list(XTTS_LANGUAGES.keys())
+            ll_lang_default = st.session_state.ll_book_language
+            ll_lang_idx = ll_lang_keys.index(ll_lang_default) if ll_lang_default in ll_lang_keys else 0
+            ll_lang_label = st.selectbox("Book language", ll_lang_keys, index=ll_lang_idx, key="ll_lang_select")
+            if ll_lang_label != st.session_state.ll_book_language:
+                st.session_state.ll_book_language = ll_lang_label
+                st.session_state.ll_summary = ""
+                st.session_state.ll_vocab = []
 
         st.markdown("---")
         st.subheader("Read Aloud")
@@ -441,11 +553,11 @@ def render_sidebar():
                     reset_session()
                     st.rerun()
 
-    return model, tts_voice, tts_rate, tts_engine
+    return model, tts_voice, tts_rate, tts_engine, st.session_state.app_mode, st.session_state.ll_book_language
 
 
 def render_app():
-    model, tts_voice, tts_rate, tts_engine = render_sidebar()
+    model, tts_voice, tts_rate, tts_engine, app_mode, ll_book_language = render_sidebar()
 
     # ------------------------------------------------------------------
     # PATH 1 — no book loaded yet: full-screen cinematic hero.
@@ -552,7 +664,10 @@ def render_app():
     left_col, right_col = st.columns([3, 2], gap="large")
 
     with left_col:
-        render_reading_panel(model, tts_voice, tts_rate, tts_engine)
+        if app_mode == "language_learning":
+            render_language_learning_panel(model, tts_voice, tts_rate, tts_engine, ll_book_language)
+        else:
+            render_reading_panel(model, tts_voice, tts_rate, tts_engine)
 
     with right_col:
         render_chat_panel(model, tts_voice, tts_rate, tts_engine)

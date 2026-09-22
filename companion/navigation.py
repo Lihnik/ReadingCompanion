@@ -13,6 +13,8 @@ def go_to_chunk(new_idx: int):
     st.session_state.section_summary = ""
     st.session_state.tts_audio = b""
     st.session_state.tts_source = ""
+    st.session_state.ll_summary = ""
+    st.session_state.ll_vocab = []
 
 
 def reset_session():
