@@ -1,7 +1,7 @@
 
 import streamlit as st
 
-from companion.constants import DEFAULTS
+from companion.constants import fresh_defaults
 
 st.set_page_config(
     page_title="Reading Companion",
@@ -10,7 +10,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-for key, default in DEFAULTS.items():
+for key, default in fresh_defaults().items():
     if key not in st.session_state:
         st.session_state[key] = default
 

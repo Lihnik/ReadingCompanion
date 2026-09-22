@@ -1,12 +1,12 @@
 # Reading Companion
 
-An AI-powered reading companion that lets you upload a PDF and read it section by section — with AI commentary, comprehension questions, text-to-speech, and a chat interface, all powered by a local Ollama model.
+An AI-powered reading companion that lets you upload a PDF or EPUB and read it section by section — with on-demand AI commentary, comprehension questions, text-to-speech, and a chat interface, all powered by a local Ollama model.
 
 ## Features
 
-- **Section-by-section reading** — PDF or EPUB uploaded, split into sections (~3000 characters max); navigate with Prev/Next or jump directly to any section
-- **AI commentary** — automatic 2-3 sentence insight per section (not a summary — adds perspective)
-- **Comprehension questions** — one question per section with answer submission and AI feedback
+- **Section-by-section reading** — PDF or EPUB uploaded, split into sections (~5000 characters max); navigate with Prev/Next or jump directly to any section
+- **AI commentary** — on-demand 2-3 sentence insight per section (not a summary — adds perspective); cached so revisiting a section does not regenerate
+- **Comprehension questions** — on-demand question per section with answer submission and AI feedback; cached per section
 - **Section summarizer** — on-demand bullet-point summary
 - **Chat** — streaming conversation grounded in the current section; last 6 messages kept as context
 - **Text-to-speech** — three engines:
@@ -16,32 +16,63 @@ An AI-powered reading companion that lets you upload a PDF and read it section b
 - **Audiobook generator** — render a selectable range of sections to a single WAV/MP3 file and download it; useful for skipping front/back matter
 - **Multi-column PDF support** — detects two-column layouts and reads left column before right
 - **Reasoning model support** — `<think>` blocks from models like Qwen3 and DeepSeek-R1 are silently stripped; token budgets sized accordingly
+- **Live model list** — sidebar model selectbox is filled from Ollama `/api/tags` (falls back to recommended names if Ollama is down)
 
 ## Requirements
 
 - [Ollama](https://ollama.com/) running locally (`ollama serve`)
 - Python 3.12 (kokoro requires `>=3.10,<3.13`)
-- For Kokoro TTS on Windows: [espeak-ng](https://github.com/espeak-ng/espeak-ng/releases) (download `espeak-ng-X.X-x64.msi`)
+- For Kokoro TTS phonemes: [espeak-ng](https://github.com/espeak-ng/espeak-ng)
+  - Windows: download `espeak-ng-X.X-x64.msi` from the releases page
+  - macOS: `brew install espeak-ng`
+  - Linux: `sudo apt install espeak-ng` (or your distro equivalent)
+- For mic → WAV conversion (XTTS record tab): `pydub` plus [ffmpeg](https://ffmpeg.org/) on `PATH`
 
 ## Setup
 
 ```bash
-py -3.12 -m venv .venv && .venv/Scripts/pip install streamlit PyMuPDF requests edge-tts "numpy>=2.0" soundfile "kokoro>=0.9.4" beautifulsoup4
+# Create a venv (POSIX)
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Create a venv (Windows PowerShell / cmd)
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Or install from the minimal `pyproject.toml`:
+
+```bash
+pip install .
 ```
 
 **GPU acceleration for Kokoro and XTTS (recommended for NVIDIA GPUs):**
+
 ```bash
-.venv/Scripts/pip install torch torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128
+# POSIX
+pip install torch torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128
+
+# Windows
+.venv\Scripts\pip install torch torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128
 ```
+
 Both engines automatically use the GPU if CUDA is detected; fall back to CPU otherwise.
 
 **XTTS engine (Estonian/multilingual TTS):**
+
+XTTS is imported as `from TTS...` — that module comes from the **`coqui-tts`** package (not a separate `TTS` PyPI name in current installs):
+
 ```bash
-.venv/Scripts/pip install "coqui-tts[codec]" huggingface_hub "transformers>=4.33.0,<5.0"
+pip install "coqui-tts[codec]" huggingface_hub "transformers>=4.33.0,<5.0"
+# or: pip install ".[xtts]"
 ```
+
 The ~5.8 GB model is downloaded on first use and cached permanently.
 
 Pull at least one Ollama model:
+
 ```bash
 ollama pull llama3.1:8b
 ```
@@ -52,7 +83,10 @@ ollama pull llama3.1:8b
 # Terminal 1
 ollama serve
 
-# Terminal 2
+# Terminal 2 (POSIX)
+python -m streamlit run reading_companion.py
+
+# Terminal 2 (Windows, without activating the venv)
 .venv\Scripts\python -m streamlit run reading_companion.py
 ```
 
@@ -60,11 +94,11 @@ Opens at `http://localhost:8501`.
 
 ## Supported Models
 
-Select in the sidebar — pull each with `ollama pull <name>` first:
+The sidebar selectbox lists models installed in Ollama (from `/api/tags`). Recommended names (used as soft preference order when present, and as fallback if Ollama is unreachable):
 
 | Model | Notes |
 |---|---|
-| `llama3.1:8b` | Default, well-rounded |
+| `llama3.1:8b` | Default preference, well-rounded |
 | `llama3.2:3b` | Faster, lighter |
 | `mistral:7b` | Good at instruction following |
 | `gemma2:9b` | Strong comprehension |
@@ -72,6 +106,8 @@ Select in the sidebar — pull each with `ollama pull <name>` first:
 | `qwen3.5:9b` | Reasoning model (thinking stripped) |
 | `deepseek-r1:8b` | Reasoning model (thinking stripped) |
 | `phi3:mini` | Very fast, small footprint |
+
+Pull each with `ollama pull <name>` first.
 
 ## TTS Voices
 

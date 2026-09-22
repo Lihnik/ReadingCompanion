@@ -2,13 +2,13 @@ import html
 import io
 import re
 
-import requests
 import streamlit as st
 
 from .constants import (
     EDGE_VOICES,
     KOKORO_VOICES,
     XTTS_LANGUAGES,
+    PREFERRED_OLLAMA_MODELS,
     SYSTEM_PROMPT_COMMENTARY,
     SYSTEM_PROMPT_QUESTION,
     SYSTEM_PROMPT_CHAT,
@@ -22,6 +22,8 @@ from .ollama import (
     build_feedback_prompt,
     build_chat_prompt,
     build_summary_prompt,
+    fetch_ollama_models,
+    order_ollama_models,
 )
 from .hero import render_landing_hero, render_ambient_bg_html
 from .parsing import parse_epub, parse_pdf
@@ -61,13 +63,32 @@ _GLASS = (
 )
 
 
+def _section_ai_cache_key(model: str) -> str:
+    """Stable cache key for per-section commentary / questions."""
+    return f"{st.session_state.pdf_name}|{st.session_state.current_chunk_idx}|{model}"
+
+
 def render_comprehension_question(chunk: dict, model: str, tts_voice: str, tts_rate: float, tts_engine: str):
     st.markdown("**Comprehension Check**")
 
+    cache_key = _section_ai_cache_key(model)
+    # Always sync display field from the cache for this (pdf, section, model).
+    st.session_state.ai_question = st.session_state.question_cache.get(cache_key, "")
+    # Drop answer/feedback UI when the active question identity changes (nav or model).
+    if st.session_state.get("_question_cache_key") != cache_key:
+        st.session_state._question_cache_key = cache_key
+        st.session_state.question_answered = False
+        st.session_state.question_feedback = ""
+
     if not st.session_state.ai_question:
-        with st.spinner("Generating comprehension question..."):
-            q = call_ollama(build_question_prompt(chunk["text"]), model, SYSTEM_PROMPT_QUESTION)
-            st.session_state.ai_question = q
+        st.caption("Read the section first, then get a question when you're ready.")
+        if st.button("Get a question", key="btn_gen_question"):
+            with st.spinner("Generating comprehension question..."):
+                q = call_ollama(build_question_prompt(chunk["text"]), model, SYSTEM_PROMPT_QUESTION)
+                st.session_state.ai_question = q
+                st.session_state.question_cache[cache_key] = q
+            st.rerun()
+        return
 
     st.markdown(f"> {st.session_state.ai_question}")
     tts_button("Read question", st.session_state.ai_question, "question", tts_voice, tts_rate, tts_engine)
@@ -146,22 +167,31 @@ def render_reading_panel(model: str, tts_voice: str = "en-US-AriaNeural", tts_ra
     _COMMENTARY_SIZE  = "0.9rem"
 
     st.markdown("**AI Commentary**")
+    cache_key = _section_ai_cache_key(model)
+    # Always sync display field from the cache for this (pdf, section, model).
+    st.session_state.ai_commentary = st.session_state.commentary_cache.get(cache_key, "")
+
     if not st.session_state.ai_commentary:
-        with st.spinner("AI is reading this section..."):
-            commentary = call_ollama(build_commentary_prompt(chunk["text"]), model, SYSTEM_PROMPT_COMMENTARY)
-            st.session_state.ai_commentary = commentary
-    _paras = [p.strip() for p in st.session_state.ai_commentary.split("\n\n") if p.strip()] or [st.session_state.ai_commentary]
-    _body = "".join(
-        f'<p style="margin:0 0 .7em 0;line-height:1.7;">{html.escape(p)}</p>'
-        for p in _paras
-    )
-    st.markdown(
-        f'<div style="width:100%;box-sizing:border-box;{_GLASS}'
-        f'color:{_COMMENTARY_COLOR};font-size:{_COMMENTARY_SIZE};line-height:1.7;">'
-        f'{_body}</div>',
-        unsafe_allow_html=True,
-    )
-    tts_button("Read commentary", st.session_state.ai_commentary, "commentary", tts_voice, tts_rate, tts_engine)
+        st.caption("Read the section first, then generate an insight when you're ready.")
+        if st.button("Generate insight", key="btn_gen_commentary"):
+            with st.spinner("AI is reading this section..."):
+                commentary = call_ollama(build_commentary_prompt(chunk["text"]), model, SYSTEM_PROMPT_COMMENTARY)
+                st.session_state.ai_commentary = commentary
+                st.session_state.commentary_cache[cache_key] = commentary
+            st.rerun()
+    else:
+        _paras = [p.strip() for p in st.session_state.ai_commentary.split("\n\n") if p.strip()] or [st.session_state.ai_commentary]
+        _body = "".join(
+            f'<p style="margin:0 0 .7em 0;line-height:1.7;">{html.escape(p)}</p>'
+            for p in _paras
+        )
+        st.markdown(
+            f'<div style="width:100%;box-sizing:border-box;{_GLASS}'
+            f'color:{_COMMENTARY_COLOR};font-size:{_COMMENTARY_SIZE};line-height:1.7;">'
+            f'{_body}</div>',
+            unsafe_allow_html=True,
+        )
+        tts_button("Read commentary", st.session_state.ai_commentary, "commentary", tts_voice, tts_rate, tts_engine)
 
     st.markdown("---")
     render_comprehension_question(chunk, model, tts_voice, tts_rate, tts_engine)
@@ -315,26 +345,34 @@ def render_sidebar():
                 st.session_state.question_answered = False
                 st.session_state.section_summary = ""
                 st.session_state.reading_started = False
+                st.session_state.commentary_cache = {}
+                st.session_state.question_cache = {}
                 st.success(f"Loaded {len(chunks)} sections from '{uploaded_file.name}'")
             else:
                 st.error("Could not extract text from this file. PDFs must be text-based (not scanned). EPUBs must contain HTML content.")
 
         st.markdown("---")
         st.subheader("AI Model")
+        installed, tags_err = fetch_ollama_models()
+        if installed is not None:
+            st.session_state.ollama_models_last = installed
+            if installed:
+                model_options = order_ollama_models(installed)
+            else:
+                model_options = list(PREFERRED_OLLAMA_MODELS)
+                st.warning("Ollama is running but no models are pulled yet.")
+        elif st.session_state.ollama_models_last:
+            model_options = order_ollama_models(st.session_state.ollama_models_last)
+            st.warning(tags_err or "Ollama unreachable — showing last known models.")
+        else:
+            model_options = list(PREFERRED_OLLAMA_MODELS)
+            st.warning(tags_err or "Ollama unreachable — showing recommended model names.")
+
         model = st.selectbox(
             "Ollama model",
-            options=[
-                "llama3.1:8b",
-                "llama3.2:3b",
-                "mistral:7b",
-                "gemma2:9b",
-                "qwen2.5:7b",
-                "qwen3.5:9b",
-                "deepseek-r1:8b",
-                "phi3:mini",
-            ],
+            options=model_options,
             index=0,
-            help="Make sure this model is pulled in Ollama first (e.g. `ollama pull llama3.1:8b`).",
+            help="Models are loaded from Ollama `/api/tags`. Pull with e.g. `ollama pull llama3.1:8b`.",
         )
 
         st.markdown("---")
@@ -397,15 +435,15 @@ def render_sidebar():
                              help="1.0 = normal speed. Drag left to slow down, right to speed up.")
 
         if st.button("Check Ollama Status", use_container_width=True):
-            try:
-                r = requests.get("http://localhost:11434/api/tags", timeout=3)
-                models = [m["name"] for m in r.json().get("models", [])]
+            models, err = fetch_ollama_models(timeout=3.0)
+            if models is not None:
+                st.session_state.ollama_models_last = models
                 if models:
                     st.success(f"Ollama running. Models: {', '.join(models)}")
                 else:
                     st.warning("Ollama running but no models pulled yet.")
-            except Exception:
-                st.error("Ollama not reachable. Run: `ollama serve`")
+            else:
+                st.error(err or "Ollama not reachable. Run: `ollama serve`")
 
         if st.session_state.pdf_chunks:
             st.markdown("---")

@@ -1,5 +1,8 @@
+import copy
+
 MAX_CHUNK_CHARS = 5000
 OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 
 SYSTEM_PROMPT_COMMENTARY = (
     "You are an insightful reading companion. When given a passage from a book, "
@@ -21,6 +24,20 @@ SYSTEM_PROMPT_CHAT = (
     "when relevant. Be conversational and helpful."
 )
 
+# Soft preference order for the model selectbox when those models are installed.
+PREFERRED_OLLAMA_MODELS = [
+    "llama3.1:8b",
+    "llama3.2:3b",
+    "mistral:7b",
+    "gemma2:9b",
+    "qwen2.5:7b",
+    "qwen3.5:9b",
+    "deepseek-r1:8b",
+    "phi3:mini",
+]
+
+# Mutable values (lists/dicts) must never be shared across sessions — always
+# obtain a fresh copy via fresh_defaults() / apply_defaults().
 DEFAULTS = {
     "pdf_chunks": [],
     "current_chunk_idx": 0,
@@ -41,7 +58,18 @@ DEFAULTS = {
     "audiobook_ext": "wav",
     "xtts_speaker_wav": b"",
     "xtts_clip_recorded": False,
+    # Per-section AI caches keyed by "pdf_name|chunk_idx|model"
+    "commentary_cache": {},
+    "question_cache": {},
+    # Last known Ollama model list (used when Ollama is temporarily unreachable)
+    "ollama_models_last": [],
 }
+
+
+def fresh_defaults() -> dict:
+    """Return a deep copy of DEFAULTS so mutables are never shared."""
+    return copy.deepcopy(DEFAULTS)
+
 
 EDGE_VOICES = {
     "Aria (US, Female)": "en-US-AriaNeural",

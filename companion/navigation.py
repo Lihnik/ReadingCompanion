@@ -1,6 +1,6 @@
 import streamlit as st
 
-from .constants import DEFAULTS
+from .constants import fresh_defaults
 
 
 def go_to_chunk(new_idx: int):
@@ -16,5 +16,5 @@ def go_to_chunk(new_idx: int):
 
 
 def reset_session():
-    for key, default in DEFAULTS.items():
+    for key, default in fresh_defaults().items():
         st.session_state[key] = default

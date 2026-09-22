@@ -6,6 +6,8 @@ import requests
 from .constants import (
     MAX_CHUNK_CHARS,
     OLLAMA_URL,
+    OLLAMA_TAGS_URL,
+    PREFERRED_OLLAMA_MODELS,
     SYSTEM_PROMPT_COMMENTARY,
     SYSTEM_PROMPT_QUESTION,
     SYSTEM_PROMPT_CHAT,
@@ -91,6 +93,28 @@ def stream_ollama(prompt: str, model: str, system_prompt: str = "", num_predict:
             yield f"\n\nERROR: {e}"
     except Exception as e:
         yield f"\n\nERROR: {e}"
+
+
+def fetch_ollama_models(timeout: float = 2.0) -> tuple[list[str] | None, str | None]:
+    """Return (model_names, error). model_names is None when Ollama is unreachable."""
+    try:
+        resp = requests.get(OLLAMA_TAGS_URL, timeout=timeout)
+        resp.raise_for_status()
+        names = [m["name"] for m in resp.json().get("models", []) if m.get("name")]
+        return names, None
+    except requests.exceptions.ConnectionError:
+        return None, "Ollama not reachable. Run: `ollama serve`"
+    except requests.exceptions.Timeout:
+        return None, "Ollama tags request timed out."
+    except Exception as e:
+        return None, f"Could not list Ollama models: {e}"
+
+
+def order_ollama_models(installed: list[str]) -> list[str]:
+    """Preferred names first (when present), then remaining installed names sorted."""
+    preferred = [m for m in PREFERRED_OLLAMA_MODELS if m in installed]
+    rest = sorted(m for m in installed if m not in preferred)
+    return preferred + rest
 
 
 def build_commentary_prompt(chunk_text: str) -> str:
