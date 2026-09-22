@@ -690,14 +690,25 @@ def _render_continuity_audio(audio_bytes: bytes, fmt: str, *, autoplay: bool) ->
 
 
 
+def _fmt_mmss(secs: float) -> str:
+    """Format seconds as m:ss for captions / scrubber labels."""
+    s = max(0, int(round(float(secs or 0))))
+    return f"{s // 60}:{s % 60:02d}"
+
+
 def _segment_payload(segments: list) -> list:
-    """Serialize segment (bytes, mime) pairs to [{mime,b64}, ...] for JS."""
+    """Serialize segment (bytes, mime) pairs to [{mime,b64,dur}, ...] for JS."""
     segs = []
     for ab, fmt in segments or []:
         if not ab:
             continue
         mime = fmt if "/" in (fmt or "") else f"audio/{fmt or 'wav'}"
-        segs.append({"mime": mime, "b64": base64.b64encode(ab).decode("ascii")})
+        dur = float(estimate_audio_seconds(ab, fmt) or 0.0)
+        segs.append({
+            "mime": mime,
+            "b64": base64.b64encode(ab).decode("ascii"),
+            "dur": round(dur, 3),
+        })
     return segs
 
 
@@ -707,10 +718,11 @@ def _progressive_player_id() -> str:
     return f"{source}_{gen}"
 
 
-def _push_segments_to_browser(segments: list) -> bool:
+def _push_segments_to_browser(segments: list, *, total: int | None = None) -> bool:
     """Write current segment list into parent/localStorage for the persistent player.
 
     Safe to remount every fragment tick — does not create or touch an <audio> element.
+    Includes per-segment durations so the scrubber can span the full loaded timeline.
     """
     try:
         import json
@@ -722,17 +734,24 @@ def _push_segments_to_browser(segments: list) -> bool:
         return False
     player_id = _progressive_player_id()
     segs_json = json.dumps(segs, separators=(",", ":"))
+    done = len(segs)
+    tot = int(total) if total and total > 0 else done
+    meta_json = json.dumps({"done": done, "total": tot}, separators=(",", ":"))
     html = f"""<!DOCTYPE html><html><body style="margin:0;height:0;overflow:hidden;">
 <script>
 (function(){{
   const ID={player_id!r};
   const SEGS={segs_json};
+  const META={meta_json};
   try {{
     window.parent.__rc_tts = window.parent.__rc_tts || {{}};
     window.parent.__rc_tts[ID] = SEGS;
+    window.parent.__rc_tts_meta = window.parent.__rc_tts_meta || {{}};
+    window.parent.__rc_tts_meta[ID] = META;
   }} catch(e) {{}}
   try {{
     localStorage.setItem("rc_tts_segs_"+ID, JSON.stringify(SEGS));
+    localStorage.setItem("rc_tts_meta_"+ID, JSON.stringify(META));
   }} catch(e) {{}}
 }})();
 </script></body></html>"""
@@ -741,11 +760,14 @@ def _push_segments_to_browser(segments: list) -> bool:
 
 
 def _render_persistent_queue_player(*, autoplay: bool) -> bool:
-    """One persistent <audio> that drains segments from parent/localStorage.
+    """One persistent <audio> + custom full-timeline scrubber.
 
     HTML depends only on player_id + autoplay (NOT segment count), so fragment
     reruns that remount a sibling pusher do not recreate this element when the
     player itself is mounted outside the polling fragment.
+
+    Timeline max = sum of loaded segment durations (grows as chunks arrive).
+    Seeking jumps to segment+offset without rebuilding a concat blob mid-play.
     """
     try:
         import streamlit.components.v1 as components
@@ -754,22 +776,55 @@ def _render_persistent_queue_player(*, autoplay: bool) -> bool:
 
     player_id = _progressive_player_id()
     auto_js = "true" if autoplay else "false"
-    html = f"""<!DOCTYPE html><html><body style="margin:0;background:transparent;">
-<audio id="a" controls style="width:100%;height:40px;"></audio>
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  html,body{{margin:0;padding:0;background:transparent;}}
+  .rc{{display:flex;align-items:center;gap:8px;padding:4px 2px;font:12px/1.25 system-ui,-apple-system,sans-serif;color:#334;box-sizing:border-box;}}
+  .rc button{{flex:0 0 auto;width:34px;height:34px;border:1px solid #c8ced6;border-radius:8px;background:#f6f7f9;cursor:pointer;font-size:14px;line-height:1;}}
+  .rc button:hover{{background:#eef1f5;}}
+  .rc .track{{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;}}
+  .rc input[type=range]{{width:100%;margin:0;accent-color:#3b82f6;}}
+  .rc .meta{{display:flex;justify-content:space-between;gap:8px;color:#667;font-variant-numeric:tabular-nums;}}
+  .rc .meta .loaded{{opacity:.85;}}
+  audio{{display:none;}}
+</style></head><body>
+<audio id="a" preload="auto"></audio>
+<div class="rc">
+  <button id="pp" type="button" title="Play/Pause" aria-label="Play/Pause">&#9654;</button>
+  <div class="track">
+    <input id="scrub" type="range" min="0" max="0" step="0.01" value="0" aria-label="Seek">
+    <div class="meta"><span id="cur">0:00</span><span class="loaded" id="loaded">0:00 loaded</span></div>
+  </div>
+</div>
 <script>
 (function(){{
   const ID={player_id!r};
   const AUTO={auto_js};
   const STATE_KEY="rc_tts_q_"+ID;
   const SEGS_KEY="rc_tts_segs_"+ID;
+  const META_KEY="rc_tts_meta_"+ID;
   const audio=document.getElementById("a");
+  const scrub=document.getElementById("scrub");
+  const btn=document.getElementById("pp");
+  const curEl=document.getElementById("cur");
+  const loadedEl=document.getElementById("loaded");
   let segs=[];
+  let durs=[];
+  let meta={{done:0,total:0}};
   let state={{i:0,t:0,playing:false}};
   let loading=false;
   let lastLen=-1;
+  let scrubbing=false;
+  let wantPlay=false;
 
   try{{ const raw=sessionStorage.getItem(STATE_KEY); if(raw) state=JSON.parse(raw); }}catch(e){{}}
   if(!Number.isFinite(state.i) || state.i<0) state.i=0;
+
+  function fmt(sec){{
+    sec=Math.max(0, Math.round(Number(sec)||0));
+    const m=(sec/60)|0, s=sec%60;
+    return m+":"+(s<10?"0":"")+s;
+  }}
 
   function persist(){{
     try{{
@@ -794,15 +849,77 @@ def _render_persistent_queue_player(*, autoplay: bool) -> bool:
     return segs;
   }}
 
-  function playSeg(i, seek, wantPlay){{
+  function readMeta(){{
+    try {{
+      if(window.parent.__rc_tts_meta && window.parent.__rc_tts_meta[ID]) {{
+        return window.parent.__rc_tts_meta[ID] || meta;
+      }}
+    }} catch(e) {{}}
+    try {{
+      const raw=localStorage.getItem(META_KEY);
+      if(raw) return JSON.parse(raw);
+    }} catch(e) {{}}
+    return meta;
+  }}
+
+  function syncDursFromSegs(){{
+    segs = readSegs();
+    while(durs.length < segs.length){{
+      const s=segs[durs.length];
+      durs.push(Number(s && s.dur) || 0);
+    }}
+    if(durs.length > segs.length) durs.length = segs.length;
+    const i=Number(audio.dataset.seg||0);
+    if(Number.isFinite(audio.duration) && audio.duration>0 && i>=0 && i<durs.length){{
+      durs[i]=audio.duration;
+    }}
+  }}
+
+  function sumBefore(i){{
+    let t=0;
+    for(let k=0;k<i && k<durs.length;k++) t+=durs[k]||0;
+    return t;
+  }}
+
+  function totalLoaded(){{
+    let t=0;
+    for(let k=0;k<durs.length;k++) t+=durs[k]||0;
+    return t;
+  }}
+
+  function globalTime(){{
+    const i=Number(audio.dataset.seg||0);
+    return sumBefore(i)+(audio.currentTime||0);
+  }}
+
+  function updateUI(){{
+    syncDursFromSegs();
+    meta=readMeta();
+    const total=totalLoaded();
+    const g=scrubbing ? Number(scrub.value)||0 : globalTime();
+    if(!scrubbing){{
+      if(Math.abs(Number(scrub.max)-total)>0.01) scrub.max=String(total>0?total:0);
+      scrub.value=String(Math.min(g, total||0));
+    }}
+    curEl.textContent=fmt(g);
+    const nm=meta.done||segs.length||0;
+    const nt=meta.total||nm;
+    loadedEl.textContent=fmt(total)+" loaded ("+nm+"/"+nt+")";
+    btn.innerHTML = (!audio.paused && !audio.ended) ? "&#10073;&#10073;" : "&#9654;";
+  }}
+
+  function playSeg(i, seek, doPlay, forceSeek){{
     segs = readSegs();
     if(i<0 || i>=segs.length) return;
     const s=segs[i];
     if(!s || !s.b64) return;
+    wantPlay=!!doPlay;
     // Same segment already loaded — never reload src mid-play.
     if(String(audio.dataset.seg)===String(i) && audio.src && audio.src.indexOf("base64,")>=0){{
-      if(seek>0.2){{ try{{ audio.currentTime=seek; }}catch(e){{}} }}
-      if(wantPlay && audio.paused){{ audio.play().catch(function(){{}}); }}
+      if(forceSeek || seek>0.05){{ try{{ audio.currentTime=Math.max(0, seek||0); }}catch(e){{}} }}
+      if(doPlay && audio.paused){{ audio.play().catch(function(){{}}); }}
+      else if(!doPlay && !audio.paused){{ audio.pause(); }}
+      updateUI();
       return;
     }}
     loading=true;
@@ -812,64 +929,122 @@ def _render_persistent_queue_player(*, autoplay: bool) -> bool:
       audio.removeEventListener("loadedmetadata", onMeta);
       loading=false;
       const dur=audio.duration||0;
-      if(seek>0.2 && (!dur || seek<dur)){{
-        try{{ audio.currentTime=seek; }}catch(e){{}}
+      if(i<durs.length && dur>0) durs[i]=dur;
+      else if(i===durs.length) durs.push(dur||Number(s.dur)||0);
+      if((forceSeek || seek>0.05) && (!dur || seek<dur || forceSeek)){{
+        try{{ audio.currentTime=Math.max(0, Math.min(seek||0, Math.max(0,dur-0.01))); }}catch(e){{}}
       }}
       if(wantPlay){{ audio.play().catch(function(){{}}); }}
+      updateUI();
     }};
     audio.addEventListener("loadedmetadata", onMeta);
     audio.src="data:"+s.mime+";base64,"+s.b64;
   }}
 
+  function seekGlobal(T, doPlay){{
+    syncDursFromSegs();
+    const total=totalLoaded();
+    if(total<=0 || !segs.length) return;
+    T=Math.max(0, Math.min(Number(T)||0, Math.max(0, total-0.01)));
+    let acc=0;
+    for(let i=0;i<durs.length;i++){{
+      const d=durs[i]||0;
+      const last=i===durs.length-1;
+      if(acc+d>T+1e-6 || last){{
+        const offset=Math.max(0, T-acc);
+        playSeg(i, offset, doPlay, true);
+        return;
+      }}
+      acc+=d;
+    }}
+  }}
+
   function maybeAdvanceQueue(){{
     segs = readSegs();
+    syncDursFromSegs();
+    updateUI();
     if(segs.length === lastLen) return;
     lastLen = segs.length;
     if(audio.paused && !loading){{
       const i=Number(audio.dataset.seg||0);
       const endedish = audio.ended || (audio.duration && audio.currentTime >= audio.duration - 0.05);
       if(endedish && (i+1) < segs.length){{
-        playSeg(i+1, 0, true);
+        playSeg(i+1, 0, true, true);
       }} else if((!audio.src || audio.error) && segs.length){{
-        playSeg(Math.min(i, segs.length-1), state.t||0, !!state.playing || AUTO);
+        playSeg(Math.min(i, segs.length-1), state.t||0, !!state.playing || AUTO, false);
       }}
     }}
   }}
 
-  audio.addEventListener("timeupdate", persist);
-  audio.addEventListener("play", function(){{ state.playing=true; persist(); }});
-  audio.addEventListener("pause", persist);
+  audio.addEventListener("timeupdate", function(){{ persist(); if(!scrubbing) updateUI(); }});
+  audio.addEventListener("play", function(){{ state.playing=true; wantPlay=true; persist(); updateUI(); }});
+  audio.addEventListener("pause", function(){{ persist(); updateUI(); }});
   audio.addEventListener("ended", function(){{
     segs = readSegs();
     const next=Number(audio.dataset.seg||0)+1;
     if(next<segs.length){{
-      playSeg(next, 0, true);
+      playSeg(next, 0, true, true);
     }} else {{
       state.playing=true; // keep wanting more if progressive still loading
       persist();
+      updateUI();
     }}
   }});
 
+  scrub.addEventListener("pointerdown", function(){{ scrubbing=true; }});
+  scrub.addEventListener("pointerup", function(){{ scrubbing=false; }});
+  scrub.addEventListener("change", function(){{
+    scrubbing=false;
+    const playing=!audio.paused || !!wantPlay;
+    seekGlobal(Number(scrub.value)||0, playing);
+  }});
+  scrub.addEventListener("input", function(){{
+    scrubbing=true;
+    curEl.textContent=fmt(Number(scrub.value)||0);
+  }});
+
+  btn.addEventListener("click", function(){{
+    if(!audio.src){{
+      segs=readSegs();
+      if(segs.length) playSeg(Number(audio.dataset.seg||state.i||0), audio.currentTime||state.t||0, true, false);
+      return;
+    }}
+    if(audio.paused){{
+      wantPlay=true; state.playing=true;
+      audio.play().catch(function(){{}});
+    }} else {{
+      wantPlay=false; state.playing=false;
+      audio.pause();
+    }}
+    persist(); updateUI();
+  }});
+
   segs = readSegs();
+  syncDursFromSegs();
   lastLen = segs.length;
   if(state.i>=segs.length && segs.length) state.i=Math.max(0, segs.length-1);
   const resume=state.t>0.2;
-  const wantPlay=!!state.playing || (AUTO && !resume);
+  wantPlay=!!state.playing || (AUTO && !resume);
   if(segs.length){{
-    playSeg(state.i||0, state.t||0, wantPlay);
+    playSeg(state.i||0, state.t||0, wantPlay, false);
   }} else if(AUTO){{
     state.playing=true;
+    wantPlay=true;
   }}
-
+  updateUI();
   setInterval(maybeAdvanceQueue, 250);
 }})();
 </script></body></html>"""
-    components.html(html, height=52)
+    components.html(html, height=64)
     return True
 
 
+
 def _render_segment_queue_audio(segments: list, *, autoplay: bool) -> bool:
-    """Legacy one-shot queue player (fallback when persistent split unavailable)."""
+    """Legacy one-shot queue player (fallback when persistent split unavailable).
+
+    Includes the same full-timeline scrubber UX as the persistent player.
+    """
     try:
         import json
         import streamlit.components.v1 as components
@@ -882,18 +1057,47 @@ def _render_segment_queue_audio(segments: list, *, autoplay: bool) -> bool:
     player_id = _progressive_player_id()
     auto_js = "true" if autoplay else "false"
     segs_json = json.dumps(segs, separators=(",", ":"))
-    html = f"""<!DOCTYPE html><html><body style="margin:0;background:transparent;">
-<audio id="a" controls style="width:100%;height:40px;"></audio>
+    html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>
+  html,body{{margin:0;padding:0;background:transparent;}}
+  .rc{{display:flex;align-items:center;gap:8px;padding:4px 2px;font:12px/1.25 system-ui,-apple-system,sans-serif;color:#334;box-sizing:border-box;}}
+  .rc button{{flex:0 0 auto;width:34px;height:34px;border:1px solid #c8ced6;border-radius:8px;background:#f6f7f9;cursor:pointer;font-size:14px;line-height:1;}}
+  .rc .track{{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;}}
+  .rc input[type=range]{{width:100%;margin:0;accent-color:#3b82f6;}}
+  .rc .meta{{display:flex;justify-content:space-between;gap:8px;color:#667;font-variant-numeric:tabular-nums;}}
+  audio{{display:none;}}
+</style></head><body>
+<audio id="a" preload="auto"></audio>
+<div class="rc">
+  <button id="pp" type="button" title="Play/Pause">&#9654;</button>
+  <div class="track">
+    <input id="scrub" type="range" min="0" max="0" step="0.01" value="0">
+    <div class="meta"><span id="cur">0:00</span><span id="loaded">0:00 loaded</span></div>
+  </div>
+</div>
 <script>
 (function(){{
   const KEY="rc_tts_q_"+{player_id!r};
   const AUTO={auto_js};
   const SEGS={segs_json};
   const audio=document.getElementById("a");
+  const scrub=document.getElementById("scrub");
+  const btn=document.getElementById("pp");
+  const curEl=document.getElementById("cur");
+  const loadedEl=document.getElementById("loaded");
+  const durs=SEGS.map(function(s){{ return Number(s.dur)||0; }});
   let state={{i:0,t:0,playing:false}};
+  let scrubbing=false;
+  let wantPlay=false;
   try{{ const raw=sessionStorage.getItem(KEY); if(raw) state=JSON.parse(raw); }}catch(e){{}}
   if(!Number.isFinite(state.i) || state.i<0) state.i=0;
   if(state.i>=SEGS.length) state.i=Math.max(0, SEGS.length-1);
+
+  function fmt(sec){{
+    sec=Math.max(0, Math.round(Number(sec)||0));
+    const m=(sec/60)|0, s=sec%60;
+    return m+":"+(s<10?"0":"")+s;
+  }}
   function persist(){{
     try{{
       sessionStorage.setItem(KEY, JSON.stringify({{
@@ -903,40 +1107,96 @@ def _render_segment_queue_audio(segments: list, *, autoplay: bool) -> bool:
       }}));
     }}catch(e){{}}
   }}
-  function playSeg(i, seek, wantPlay){{
+  function sumBefore(i){{
+    let t=0; for(let k=0;k<i && k<durs.length;k++) t+=durs[k]||0; return t;
+  }}
+  function totalLoaded(){{
+    let t=0; for(let k=0;k<durs.length;k++) t+=durs[k]||0; return t;
+  }}
+  function globalTime(){{
+    return sumBefore(Number(audio.dataset.seg||0))+(audio.currentTime||0);
+  }}
+  function updateUI(){{
+    const i=Number(audio.dataset.seg||0);
+    if(Number.isFinite(audio.duration) && audio.duration>0 && i>=0 && i<durs.length) durs[i]=audio.duration;
+    const total=totalLoaded();
+    const g=scrubbing ? Number(scrub.value)||0 : globalTime();
+    if(!scrubbing){{
+      scrub.max=String(total>0?total:0);
+      scrub.value=String(Math.min(g, total||0));
+    }}
+    curEl.textContent=fmt(g);
+    loadedEl.textContent=fmt(total)+" loaded ("+SEGS.length+"/"+SEGS.length+")";
+    btn.innerHTML = (!audio.paused && !audio.ended) ? "&#10073;&#10073;" : "&#9654;";
+  }}
+  function playSeg(i, seek, doPlay, forceSeek){{
     if(i<0 || i>=SEGS.length) return;
     const s=SEGS[i];
+    wantPlay=!!doPlay;
+    if(String(audio.dataset.seg)===String(i) && audio.src && audio.src.indexOf("base64,")>=0){{
+      if(forceSeek || seek>0.05){{ try{{ audio.currentTime=Math.max(0, seek||0); }}catch(e){{}} }}
+      if(doPlay && audio.paused) audio.play().catch(function(){{}});
+      else if(!doPlay && !audio.paused) audio.pause();
+      updateUI(); return;
+    }}
     state.i=i;
     audio.dataset.seg=String(i);
     const onMeta=function(){{
       audio.removeEventListener("loadedmetadata", onMeta);
       const dur=audio.duration||0;
-      if(seek>0.2 && (!dur || seek<dur)){{
-        try{{ audio.currentTime=seek; }}catch(e){{}}
+      if(i<durs.length && dur>0) durs[i]=dur;
+      if((forceSeek || seek>0.05) && (!dur || seek<dur || forceSeek)){{
+        try{{ audio.currentTime=Math.max(0, Math.min(seek||0, Math.max(0,dur-0.01))); }}catch(e){{}}
       }}
-      if(wantPlay){{ audio.play().catch(function(){{}}); }}
+      if(wantPlay) audio.play().catch(function(){{}});
+      updateUI();
     }};
     audio.addEventListener("loadedmetadata", onMeta);
     audio.src="data:"+s.mime+";base64,"+s.b64;
   }}
-  audio.addEventListener("timeupdate", persist);
-  audio.addEventListener("play", persist);
-  audio.addEventListener("pause", persist);
+  function seekGlobal(T, doPlay){{
+    const total=totalLoaded();
+    if(total<=0) return;
+    T=Math.max(0, Math.min(Number(T)||0, Math.max(0,total-0.01)));
+    let acc=0;
+    for(let i=0;i<durs.length;i++){{
+      const d=durs[i]||0;
+      const last=i===durs.length-1;
+      if(acc+d>T+1e-6 || last){{
+        playSeg(i, Math.max(0,T-acc), doPlay, true);
+        return;
+      }}
+      acc+=d;
+    }}
+  }}
+  audio.addEventListener("timeupdate", function(){{ persist(); if(!scrubbing) updateUI(); }});
+  audio.addEventListener("play", function(){{ state.playing=true; wantPlay=true; persist(); updateUI(); }});
+  audio.addEventListener("pause", function(){{ persist(); updateUI(); }});
   audio.addEventListener("ended", function(){{
     const next=Number(audio.dataset.seg||0)+1;
-    if(next<SEGS.length){{
-      playSeg(next, 0, true);
-    }} else {{
-      persist();
-    }}
+    if(next<SEGS.length) playSeg(next, 0, true, true);
+    else {{ persist(); updateUI(); }}
+  }});
+  scrub.addEventListener("pointerdown", function(){{ scrubbing=true; }});
+  scrub.addEventListener("change", function(){{
+    scrubbing=false;
+    seekGlobal(Number(scrub.value)||0, !audio.paused || !!wantPlay);
+  }});
+  scrub.addEventListener("input", function(){{ scrubbing=true; curEl.textContent=fmt(Number(scrub.value)||0); }});
+  btn.addEventListener("click", function(){{
+    if(audio.paused){{ wantPlay=true; state.playing=true; audio.play().catch(function(){{}}); }}
+    else {{ wantPlay=false; state.playing=false; audio.pause(); }}
+    persist(); updateUI();
   }});
   const resume=state.t>0.2;
-  const wantPlay=!!state.playing || (AUTO && !resume);
-  playSeg(state.i||0, state.t||0, wantPlay);
+  wantPlay=!!state.playing || (AUTO && !resume);
+  playSeg(state.i||0, state.t||0, wantPlay, false);
+  updateUI();
 }})();
 </script></body></html>"""
-    components.html(html, height=52)
+    components.html(html, height=64)
     return True
+
 
 
 def clear_progressive_tts():
@@ -1404,14 +1664,15 @@ def render_tts_caption_and_push() -> bool:
             secs = sum(estimate_audio_seconds(ab, f) for ab, f in audios)
         else:
             secs = estimate_audio_seconds(audio_bytes, fmt)
+        loaded_label = _fmt_mmss(secs)
         if active:
-            st.caption(f"Loaded {done}/{total} · ~{int(round(secs))}s so far")
+            st.caption(f"~{loaded_label} loaded ({done}/{total})")
         elif done >= total > 0:
-            st.caption(f"Ready · {done}/{total} · ~{int(round(secs))}s")
+            st.caption(f"Ready · ~{loaded_label} ({done}/{total})")
         else:
-            st.caption(f"Loaded {done}/{total} · ~{int(round(secs))}s so far")
+            st.caption(f"~{loaded_label} loaded ({done}/{total})")
         if audios:
-            _push_segments_to_browser(audios)
+            _push_segments_to_browser(audios, total=total)
         return True
     return False
 
@@ -1476,7 +1737,10 @@ def _progressive_fragment_tick():
         _advance_progressive_one()
         audios = st.session_state.get("tts_segment_audios") or []
         if audios:
-            _push_segments_to_browser(audios)
+            _push_segments_to_browser(
+                audios,
+                total=len(st.session_state.get("tts_segments") or []) or None,
+            )
         if was_active and not st.session_state.get("tts_progressive_active"):
             st.rerun()
 
@@ -1511,7 +1775,10 @@ def maybe_continue_progressive():
     if _HAS_FRAGMENT and (active or has_playlist):
         audios = st.session_state.get("tts_segment_audios") or []
         if audios:
-            _push_segments_to_browser(audios)
+            _push_segments_to_browser(
+                audios,
+                total=len(st.session_state.get("tts_segments") or []) or None,
+            )
         autoplay = just == 0
         col_audio, col_stop = st.columns([5, 1])
         with col_audio:

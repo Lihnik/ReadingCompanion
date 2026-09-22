@@ -72,10 +72,12 @@ Default Streamlit port is 8501. The app opens automatically in the browser.
   per-word ▶ uses inline HTML audio (no shared-player remount). “Read vocabulary” removed.
 - **Progressive TTS**: `speak_text` / `tts_button` split long text (XTTS ~200
   chars); first segment plays ASAP; remaining segments continue via
-  `@st.fragment(run_every=…)`. Playback mounts one persistent HTML `<audio>` outside the polling fragment;
-  new segments are pushed via `localStorage`/`window.parent` and drained in JS
-  without remounting the playing element (no bar flicker / micro-stutter on each
-  ~4s chunk boundary). Full concat is built only when the playlist completes. Session keys: `tts_segments`,
+  `@st.fragment(run_every=…)`. Playback mounts one persistent HTML player outside the polling fragment
+  (hidden `<audio>` + custom full-timeline scrubber); new segments are pushed via
+  `localStorage`/`window.parent` with per-segment `dur` and drained in JS without remounting.
+  Scrubber max = sum of loaded durations; seek maps global time → segment index + offset
+  (gapless `ended` queue; no mid-play concat remount). Full concat is built only when the
+  playlist completes. Session keys: `tts_segments`,
   `tts_segment_audios`, `tts_progressive_*`, `tts_player_gen`. Cache capped at
   `TTS_CACHE_MAX_ENTRIES`.
 - **Ollama GPU**: model residency/GPU is via Ollama (`ollama ps`), not Streamlit.
