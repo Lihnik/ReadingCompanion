@@ -12,7 +12,10 @@ import {
   type SectionMeta,
   type VocabEntry,
 } from './api';
+import { AudiobookPanel } from './AudiobookPanel';
+import { ChatPanel } from './ChatPanel';
 import { ProgressivePlayer } from './ProgressivePlayer';
+import { ReadingPanel } from './ReadingPanel';
 import './index.css';
 
 const LANGS = [
@@ -27,9 +30,17 @@ const LANGS = [
   'Finnish',
   'Estonian',
   'English',
+  'Czech',
+  'Turkish',
+  'Arabic',
+  'Chinese',
+  'Japanese',
+  'Korean',
+  'Hungarian',
 ];
 
 const ENGINES = ['Edge TTS', 'Kokoro', 'XTTS'] as const;
+type AppMode = 'language_learning' | 'reading';
 
 export default function App() {
   const [models, setModels] = useState<string[]>([]);
@@ -37,6 +48,8 @@ export default function App() {
   const [model, setModel] = useState('llama3.1:8b');
   const [language, setLanguage] = useState('Italian');
   const [engine, setEngine] = useState<(typeof ENGINES)[number]>('Edge TTS');
+  const [rate, setRate] = useState(1.0);
+  const [appMode, setAppMode] = useState<AppMode>('language_learning');
   const [voices, setVoices] = useState<{
     edge: Record<string, string>;
     kokoro: Record<string, string>;
@@ -59,6 +72,16 @@ export default function App() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [wordBusy, setWordBusy] = useState<string | null>(null);
   const wordCache = useMemo(() => new Map<string, string>(), []);
+
+  const ttsOpts = useMemo(
+    () => ({
+      engine,
+      voice,
+      rate,
+      speaker_key: speakerKey,
+    }),
+    [engine, voice, rate, speakerKey],
+  );
 
   useEffect(() => {
     listModels()
@@ -89,6 +112,7 @@ export default function App() {
   const loadSection = useCallback(async (bid: string, idx: number) => {
     setBusy('section');
     setError('');
+    setJobId(null);
     try {
       const s = await getSection(bid, idx);
       setSectionIdx(s.index);
@@ -96,13 +120,26 @@ export default function App() {
       setSectionText(s.text);
       setSummary('');
       setVocab([]);
-      setJobId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
     }
   }, []);
+
+  const sectionPos = useMemo(() => {
+    const i = sections.findIndex((s) => s.index === sectionIdx);
+    return i < 0 ? 0 : i;
+  }, [sections, sectionIdx]);
+
+  const goPrev = () => {
+    if (!bookId || sectionPos <= 0) return;
+    void loadSection(bookId, sections[sectionPos - 1].index);
+  };
+  const goNext = () => {
+    if (!bookId || sectionPos >= sections.length - 1) return;
+    void loadSection(bookId, sections[sectionPos + 1].index);
+  };
 
   const onUpload = async (file: File | null) => {
     if (!file) return;
@@ -203,10 +240,7 @@ export default function App() {
       const r = await startSectionTts({
         book_id: bookId,
         section_idx: sectionIdx,
-        engine,
-        voice,
-        rate: 1.0,
-        speaker_key: speakerKey,
+        ...ttsOpts,
       });
       setJobId(r.job_id);
     } catch (e) {
@@ -219,11 +253,11 @@ export default function App() {
   const playWord = async (word: string) => {
     setWordBusy(word);
     try {
-      let url = wordCache.get(`${language}|${word}`);
+      let url = wordCache.get(`${language}|${word}|${rate}`);
       if (!url) {
-        const blob = await fetchWordAudio(word, language, speakerKey);
+        const blob = await fetchWordAudio(word, language, speakerKey, rate);
         url = URL.createObjectURL(blob);
-        wordCache.set(`${language}|${word}`, url);
+        wordCache.set(`${language}|${word}|${rate}`, url);
       }
       const audio = new Audio(url);
       await audio.play();
@@ -246,7 +280,24 @@ export default function App() {
       <aside className="sidebar">
         <h1 style={{ fontSize: '1.1rem', marginTop: 0 }}>Reading Companion</h1>
         <div className="muted" style={{ marginBottom: '0.75rem' }}>
-          Language Learning MVP (React)
+          React + FastAPI
+        </div>
+
+        <div className="mode-toggle">
+          <button
+            type="button"
+            className={appMode === 'language_learning' ? 'active' : ''}
+            onClick={() => setAppMode('language_learning')}
+          >
+            Language Learning
+          </button>
+          <button
+            type="button"
+            className={appMode === 'reading' ? 'active' : ''}
+            onClick={() => setAppMode('reading')}
+          >
+            Reading
+          </button>
         </div>
 
         <label className="field">
@@ -270,16 +321,18 @@ export default function App() {
           </select>
         </label>
 
-        <label className="field">
-          Book language
-          <select value={language} onChange={(e) => setLanguage(e.target.value)}>
-            {LANGS.map((l) => (
-              <option key={l} value={l}>
-                {l}
-              </option>
-            ))}
-          </select>
-        </label>
+        {appMode === 'language_learning' && (
+          <label className="field">
+            Book language
+            <select value={language} onChange={(e) => setLanguage(e.target.value)}>
+              {LANGS.map((l) => (
+                <option key={l} value={l}>
+                  {l}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
 
         <label className="field">
           TTS engine
@@ -306,6 +359,18 @@ export default function App() {
           </select>
         </label>
 
+        <label className="field">
+          Rate ({rate.toFixed(2)}×)
+          <input
+            type="range"
+            min={0.5}
+            max={2}
+            step={0.05}
+            value={rate}
+            onChange={(e) => setRate(Number(e.target.value))}
+          />
+        </label>
+
         {engine === 'XTTS' && (
           <label className="field">
             XTTS speaker WAV
@@ -313,6 +378,35 @@ export default function App() {
             {speakerKey ? <span className="ok">Speaker ready</span> : <span className="muted">Required for XTTS</span>}
           </label>
         )}
+
+        <div className="nav-row">
+          <button type="button" className="btn btn-sm" disabled={!bookId || sectionPos <= 0} onClick={goPrev}>
+            ← Prev
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={!bookId || sectionPos >= sections.length - 1}
+            onClick={goNext}
+          >
+            Next →
+          </button>
+        </div>
+
+        <label className="field">
+          Jump to section
+          <select
+            value={sectionIdx}
+            disabled={!bookId}
+            onChange={(e) => bookId && loadSection(bookId, Number(e.target.value))}
+          >
+            {sections.map((s) => (
+              <option key={s.index} value={s.index}>
+                {s.index}: {s.title}
+              </option>
+            ))}
+          </select>
+        </label>
 
         <h3 style={{ fontSize: '0.85rem', color: 'var(--muted)' }}>Sections</h3>
         <ul className="section-list">
@@ -329,83 +423,118 @@ export default function App() {
             </li>
           ))}
         </ul>
+
+        <AudiobookPanel bookId={bookId} sections={sections} tts={ttsOpts} />
       </aside>
 
       <main className="main">
         <div className="header">
           <h1>{sectionTitle || 'No section selected'}</h1>
-          {bookId && <span className="badge">section {sectionIdx}</span>}
+          {bookId && (
+            <span className="badge">
+              {sectionPos + 1}/{sections.length} · idx {sectionIdx}
+            </span>
+          )}
+          <span className="badge mode-badge">{appMode === 'reading' ? 'Reading' : 'LL'}</span>
           {busy && <span className="muted">Working: {busy}…</span>}
         </div>
-        {error && <div className="error" style={{ padding: '0.5rem 1.25rem' }}>{error}</div>}
-        <div className="section-text">{sectionText || 'Upload a book to begin.'}</div>
-        <div className="player-bar">
-          <div className="btn-row">
-            <button type="button" className="btn primary" disabled={!bookId || !!busy} onClick={runReadAloud}>
-              Read aloud
-            </button>
-            <button type="button" className="btn" disabled={!bookId || !!busy} onClick={runPrepare}>
-              Prepare
-            </button>
-            <button type="button" className="btn" disabled={!bookId || !!busy} onClick={runSummary}>
-              English summary
-            </button>
-            <button type="button" className="btn" disabled={!bookId || !!busy} onClick={runVocab}>
-              Vocabulary
-            </button>
+        {error && (
+          <div className="error" style={{ padding: '0.5rem 1.25rem' }}>
+            {error}
           </div>
-          <ProgressivePlayer jobId={jobId} />
-        </div>
+        )}
+        <div className="section-text">{sectionText || 'Upload a book to begin.'}</div>
+
+        {appMode === 'language_learning' ? (
+          <div className="player-bar">
+            <div className="btn-row">
+              <button type="button" className="btn primary" disabled={!bookId || !!busy} onClick={runReadAloud}>
+                Read aloud
+              </button>
+              <button type="button" className="btn" disabled={!bookId || !!busy} onClick={runPrepare}>
+                Prepare
+              </button>
+              <button type="button" className="btn" disabled={!bookId || !!busy} onClick={runSummary}>
+                English summary
+              </button>
+              <button type="button" className="btn" disabled={!bookId || !!busy} onClick={runVocab}>
+                Vocabulary
+              </button>
+            </div>
+            <ProgressivePlayer jobId={jobId} onStopped={() => setJobId(null)} />
+          </div>
+        ) : (
+          <div className="player-bar reading-bar">
+            <ReadingPanel
+              bookId={bookId}
+              sectionIdx={sectionIdx}
+              sectionText={sectionText}
+              model={model}
+              tts={ttsOpts}
+              onReadSection={runReadAloud}
+              onJobId={setJobId}
+              busy={busy}
+            />
+            <ProgressivePlayer jobId={jobId} onStopped={() => setJobId(null)} />
+          </div>
+        )}
       </main>
 
       <aside className="rail">
-        <div className="card">
-          <h3>English summary</h3>
-          <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.92rem' }}>
-            {summary || <span className="muted">Not generated yet.</span>}
-          </div>
-        </div>
+        {appMode === 'language_learning' && (
+          <>
+            <div className="card">
+              <h3>English summary</h3>
+              <div style={{ whiteSpace: 'pre-wrap', fontSize: '0.92rem' }}>
+                {summary || <span className="muted">Not generated yet.</span>}
+              </div>
+            </div>
 
-        <div className="card">
-          <h3>Vocabulary</h3>
-          {vocab.length === 0 ? (
-            <span className="muted">Not generated yet.</span>
-          ) : (
-            <table className="vocab-table">
-              <thead>
-                <tr>
-                  <th></th>
-                  <th>Word</th>
-                  <th>Translation</th>
-                </tr>
-              </thead>
-              <tbody>
-                {vocab.map((v) => (
-                  <tr key={v.word}>
-                    <td>
-                      <button
-                        type="button"
-                        className="play-word"
-                        title={`Pronounce ${v.word}`}
-                        disabled={wordBusy === v.word}
-                        onClick={() => playWord(v.word)}
-                      >
-                        {wordBusy === v.word ? '…' : '▶'}
-                      </button>
-                    </td>
-                    <td>{v.word}</td>
-                    <td>{v.translation}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+            <div className="card">
+              <h3>Vocabulary</h3>
+              {vocab.length === 0 ? (
+                <span className="muted">Not generated yet.</span>
+              ) : (
+                <table className="vocab-table">
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th>Word</th>
+                      <th>Translation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vocab.map((v) => (
+                      <tr key={v.word}>
+                        <td>
+                          <button
+                            type="button"
+                            className="play-word"
+                            title={`Pronounce ${v.word}`}
+                            disabled={wordBusy === v.word}
+                            onClick={() => playWord(v.word)}
+                          >
+                            {wordBusy === v.word ? '…' : '▶'}
+                          </button>
+                        </td>
+                        <td>{v.word}</td>
+                        <td>{v.translation}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </>
+        )}
 
-        <div className="card stub">
-          <h3>Chat</h3>
-          Coming soon — prioritize read + LL AI + audio in this MVP.
-        </div>
+        <ChatPanel
+          bookId={bookId}
+          sectionIdx={sectionIdx}
+          model={model}
+          tts={ttsOpts}
+          onJobId={setJobId}
+        />
       </aside>
     </div>
   );

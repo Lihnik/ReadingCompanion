@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { pollSegments, type SegmentInfo } from './api';
+import { pollSegments, stopTtsJob, type SegmentInfo } from './api';
 
 type LoadedSeg = {
   index: number;
@@ -18,9 +18,11 @@ function fmt(secs: number) {
 export function ProgressivePlayer({
   jobId,
   onDone,
+  onStopped,
 }: {
   jobId: string | null;
   onDone?: () => void;
+  onStopped?: () => void;
 }) {
   const [status, setStatus] = useState('');
   const [loadedSec, setLoadedSec] = useState(0);
@@ -33,8 +35,8 @@ export function ProgressivePlayer({
   const segsRef = useRef<LoadedSeg[]>([]);
   const fetchedRef = useRef<Set<number>>(new Set());
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const playOriginRef = useRef(0); // ctx.currentTime when play started
-  const offsetRef = useRef(0); // timeline offset at play start
+  const playOriginRef = useRef(0);
+  const offsetRef = useRef(0);
   const rafRef = useRef(0);
   const doneRef = useRef(false);
 
@@ -119,7 +121,6 @@ export function ProgressivePlayer({
       setCurrentTime(startAt);
       rafRef.current = requestAnimationFrame(tick);
       src.onended = () => {
-        // Only mark stopped if this source is still current
         if (sourceRef.current === src) {
           setPlaying(false);
           sourceRef.current = null;
@@ -129,7 +130,19 @@ export function ProgressivePlayer({
     [concatLoaded, stopSource, tick],
   );
 
-  // Poll segments
+  const hardStop = useCallback(async () => {
+    stopSource();
+    setPlaying(false);
+    if (jobId) {
+      try {
+        await stopTtsJob(jobId);
+      } catch {
+        /* ignore */
+      }
+    }
+    onStopped?.();
+  }, [jobId, stopSource, onStopped]);
+
   useEffect(() => {
     if (!jobId) return;
     segsRef.current = [];
@@ -170,15 +183,18 @@ export function ProgressivePlayer({
           if (cancelled) break;
           setTotal(data.total);
           setReadyCount(data.ready_count);
+          if (data.cancelled) {
+            setStatus('Stopped');
+            break;
+          }
           setStatus(
             data.done
               ? `Ready ${data.ready_count}/${data.total}`
               : `Loading ${data.ready_count}/${data.total}…`,
           );
           await Promise.all(data.segments.map(fetchAudio));
-          // Auto-start when first segment ready
           if (!playing && segsRef.current.length > 0 && sourceRef.current === null && !doneRef.current) {
-            doneRef.current = true; // gate autoplay once
+            doneRef.current = true;
             await playFrom(0);
           }
           if (data.done) {
@@ -212,6 +228,9 @@ export function ProgressivePlayer({
         >
           {playing ? 'Pause' : 'Play'}
         </button>
+        <button type="button" className="btn" onClick={() => void hardStop()}>
+          Stop
+        </button>
         <input
           type="range"
           min={0}
@@ -230,7 +249,9 @@ export function ProgressivePlayer({
           {fmt(currentTime)} / {fmt(loadedSec)}
         </span>
       </div>
-      <div className="muted">{status} ({readyCount}/{total})</div>
+      <div className="muted">
+        {status} ({readyCount}/{total})
+      </div>
     </div>
   );
 }
