@@ -22,6 +22,10 @@ api = [
     "uvicorn[standard]>=0.27",
     "python-multipart>=0.0.9",
 ]
+# Convenience alias for the React + FastAPI stack (same as api).
+react = [
+    "reading-companion[api]",
+]
 xtts = [
     "coqui-tts[codec]",
     "huggingface_hub",
@@ -31,6 +35,14 @@ piper = [
     "piper-tts",
     "onnxruntime",
 ]
+dev = [
+    "httpx",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["companion*"]
+# backend/ is run via PYTHONPATH=.; not installed as a package.

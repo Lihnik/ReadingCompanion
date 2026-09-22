@@ -36,27 +36,28 @@ The sidebar **Library** lists saved books; refresh restores the most recent book
 
 ## Setup
 
-### Backend (POSIX)
+Packaging is **uv**-first (`pyproject.toml` + `uv.lock`). Python **3.12** is pinned (`.python-version`); Kokoro needs `>=3.10,<3.13`. Install [uv](https://docs.astral.sh/uv/) if needed.
+
+### Backend with uv (preferred)
 
 ```bash
 cd ReadingCompanion
-python3.12 -m venv .venv          # or python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-api.txt
-# Optional XTTS: pip install ".[xtts]"
-# Optional Piper Italian TTS: pip install ".[piper]"
-#   (or: pip install piper-tts onnxruntime)
-#   First run downloads it_IT-paola-medium (~60 MB) into .cache/piper/.
-#   Note: facebook/mms-tts-ita does not exist on Hugging Face (Italian has MMS ASR only).
+uv sync --extra api
+# Optional Piper Italian:  uv sync --extra api --extra piper
+# Optional XTTS:           uv sync --extra api --extra xtts
+# Dev smoke (httpx):       uv sync --extra api --extra dev
+# Alias:                   uv sync --extra react   # same deps as api
+#
+# First Piper run downloads it_IT-paola-medium (~60 MB) into .cache/piper/.
+# Note: facebook/mms-tts-ita does not exist on Hugging Face (Italian has MMS ASR only).
 ```
 
-### Backend (Windows PowerShell)
+Windows (PowerShell), same commands once `uv` is on `PATH`:
 
 ```powershell
 cd ReadingCompanion
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements-api.txt
+uv sync --extra api
+# optional: uv sync --extra api --extra piper
 ```
 
 ### Frontend
@@ -71,15 +72,12 @@ npm install
 Terminal 1 — API (from **repo root**):
 
 ```bash
-# POSIX
-source .venv/bin/activate
-PYTHONPATH=. uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+# POSIX — uv run uses .venv; PYTHONPATH lets uvicorn import backend/ and companion/
+PYTHONPATH=. uv run uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 
-# Windows (cmd / PowerShell)
-.\.venv\Scripts\python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
-# Set PYTHONPATH to the repo root first, e.g.:
-#   PowerShell:  $env:PYTHONPATH = (Get-Location).Path
-#   cmd:         set PYTHONPATH=%CD%
+# Windows PowerShell
+$env:PYTHONPATH = (Get-Location).Path
+uv run uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Terminal 2 — Vite:
@@ -99,6 +97,31 @@ Streamlit (still available):
 python -m streamlit run reading_companion.py
 ```
 
+<details>
+<summary>pip fallback (no uv)</summary>
+
+```bash
+# POSIX
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-api.txt
+# Optional: pip install ".[piper]" / ".[xtts]"
+PYTHONPATH=. uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+```powershell
+# Windows PowerShell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-api.txt
+$env:PYTHONPATH = (Get-Location).Path
+uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+`requirements.txt` / `requirements-api.txt` are exported from `uv.lock` for Windows users who stay on pip; prefer `uv sync` when possible.
+
+</details>
+
 ## Features
 
 ### Piper Italian TTS
@@ -108,8 +131,8 @@ Dedicated local Italian voice via **Piper** (`piper-tts`) and the Rhasspy voice 
 > **Why not MMS?** `facebook/mms-tts-ita` does **not** exist on Hugging Face. Meta’s MMS project ships Italian **ASR**, not TTS ([HF forum](https://discuss.huggingface.co/t/why-is-mms-tts-ita-model-not-available/139990)). Piper Paola is the dedicated Italian engine used here instead.
 
 ```bash
-pip install piper-tts onnxruntime
-# or: pip install ".[piper]"
+uv sync --extra api --extra piper
+# pip fallback: pip install ".[piper]"   # or: pip install piper-tts onnxruntime
 ```
 
 Then **restart uvicorn** so the API process picks up the new packages.
@@ -129,8 +152,8 @@ Then **restart uvicorn** so the API process picks up the new packages.
 - If the JSON `detail` mentions `No module named 'piper'` (or onnxruntime), install Piper deps and restart:
 
   ```bash
-  pip install ".[piper]"
-  # restart: PYTHONPATH=. uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
+  uv sync --extra api --extra piper
+  # restart: PYTHONPATH=. uv run uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
   ```
 
 - With Piper still unavailable, word ▶ should still play via **Edge** for languages that have an Edge voice (e.g. Italian). Section read-aloud with Piper Italian surfaces the real error on the progressive job (`seg.error`) instead of silent failure.

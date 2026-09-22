@@ -36,6 +36,18 @@ An AI-powered reading companion that lets you upload a PDF or EPUB and read it s
 
 ## Setup
 
+Preferred: **[uv](https://docs.astral.sh/uv/)** (`pyproject.toml` + `uv.lock`, Python 3.12 pinned via `.python-version`):
+
+```bash
+uv sync
+# Optional Piper Italian: uv sync --extra piper
+# Optional XTTS:          uv sync --extra xtts
+uv run python -m streamlit run reading_companion.py
+```
+
+<details>
+<summary>pip fallback</summary>
+
 ```bash
 # Create a venv (POSIX)
 python3.12 -m venv .venv
@@ -49,11 +61,15 @@ py -3.12 -m venv .venv
 pip install -r requirements.txt
 ```
 
-Or install from the minimal `pyproject.toml`:
+Or install from `pyproject.toml`:
 
 ```bash
 pip install .
 ```
+
+`requirements.txt` is exported from `uv.lock` for users without uv.
+
+</details>
 
 **GPU acceleration for Kokoro and XTTS (recommended for NVIDIA GPUs):**
 
@@ -92,7 +108,10 @@ ollama pull llama3.1:8b
 # Terminal 1
 ollama serve
 
-# Terminal 2 (POSIX)
+# Terminal 2 (uv)
+uv run python -m streamlit run reading_companion.py
+
+# Terminal 2 (POSIX, activated venv)
 python -m streamlit run reading_companion.py
 
 # Terminal 2 (Windows, without activating the venv)
